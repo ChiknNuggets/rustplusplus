@@ -20,10 +20,31 @@
 
 const DiscordCommandHandler = require('../handlers/discordCommandHandler.js');
 const DiscordTools = require('../discordTools/discordTools');
+const InstanceUtils = require('../util/instanceUtils.js');
 
 module.exports = {
     name: 'messageCreate',
     async execute(client, message) {
+        if (!message.guild) {
+            for (const guild of client.guilds.cache.values()) {
+                let credentials;
+                try {
+                    credentials = InstanceUtils.readCredentialsFile(guild.id);
+                }
+                catch (e) {
+                    continue;
+                }
+                const hosterSteamId = credentials.hoster;
+                if (!hosterSteamId) continue;
+                const hosterDiscordId = credentials[hosterSteamId] ? credentials[hosterSteamId].discord_user_id : null;
+                if (hosterDiscordId && hosterDiscordId === message.author.id) {
+                    client.log(client.intlGet(null, 'infoCap'), `DM from hoster ${message.author.username} (${message.author.id}): ${message.cleanContent}`);
+                    break;
+                }
+            }
+            return;
+        }
+
         const instance = client.getInstance(message.guild.id);
         const rustplus = client.rustplusInstances[message.guild.id];
 
