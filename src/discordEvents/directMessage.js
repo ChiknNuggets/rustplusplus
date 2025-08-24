@@ -17,6 +17,7 @@
     https://github.com/alexemanuelol/rustplusplus
 
 */
+const DiscordVoice = require('../discordTools/discordVoice.js');
 
 module.exports = {
     name: 'messageCreate',
@@ -30,7 +31,9 @@ module.exports = {
             const instance = client.getInstance(guildId);
             if (instance && instance.blacklist['discordIds'].includes(message.author.id)) continue;
 
-            await rustplus.sendInGameMessage(`${message.author.username}: ${message.cleanContent}`);
+            const text = `${message.author.username}: ${message.cleanContent}`;
+            await rustplus.sendInGameMessage(text);
+            await DiscordVoice.sendDiscordVoiceMessage(guildId, text);
         }
 
         client.log(client.intlGet(null, 'infoCap'), client.intlGet(null, 'logDiscordMessage', {
