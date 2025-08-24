@@ -31,8 +31,7 @@ module.exports = {
             const instance = client.getInstance(guildId);
             if (instance && instance.blacklist['discordIds'].includes(message.author.id)) continue;
 
-            const text = `${message.author.username}: ${message.cleanContent}`;
-            await DiscordVoice.sendDiscordVoiceMessage(guildId, text);
+            await DiscordVoice.sendDiscordVoiceMessage(guildId, message.cleanContent);
         }
 
         client.log(client.intlGet(null, 'infoCap'), client.intlGet(null, 'logDiscordMessage', {
