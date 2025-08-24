@@ -32,7 +32,6 @@ module.exports = {
             if (instance && instance.blacklist['discordIds'].includes(message.author.id)) continue;
 
             const text = `${message.author.username}: ${message.cleanContent}`;
-            await rustplus.sendInGameMessage(text);
             await DiscordVoice.sendDiscordVoiceMessage(guildId, text);
         }
 
