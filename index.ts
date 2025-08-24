@@ -32,7 +32,9 @@ const client = new DiscordBot({
         Discord.GatewayIntentBits.GuildMessages,
         Discord.GatewayIntentBits.MessageContent,
         Discord.GatewayIntentBits.GuildMembers,
-        Discord.GatewayIntentBits.GuildVoiceStates],
+        Discord.GatewayIntentBits.GuildVoiceStates,
+        Discord.GatewayIntentBits.DirectMessages],
+    partials: [Discord.Partials.Channel],
     retryLimit: 2,
     restRequestTimeout: 60000,
     disableEveryone: false
