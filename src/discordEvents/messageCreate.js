@@ -20,14 +20,31 @@
 
 const DiscordCommandHandler = require('../handlers/discordCommandHandler.js');
 const DiscordTools = require('../discordTools/discordTools');
+const DiscordVoice = require('../discordTools/discordVoice');
+const InstanceUtils = require('../util/instanceUtils');
 
 module.exports = {
     name: 'messageCreate',
     async execute(client, message) {
+        if (message.author.bot) return;
+
+        if (!message.guild) {
+            for (const guildId of Object.keys(client.rustplusInstances)) {
+                const credentials = InstanceUtils.readCredentialsFile(guildId);
+                const hoster = credentials.hoster;
+                if (!hoster) continue;
+                const userId = credentials[hoster]?.discord_user_id;
+                if (userId === message.author.id) {
+                    await DiscordVoice.sendDiscordVoiceMessage(guildId, message.cleanContent);
+                }
+            }
+            return;
+        }
+
         const instance = client.getInstance(message.guild.id);
         const rustplus = client.rustplusInstances[message.guild.id];
 
-        if (message.author.bot || !rustplus || (rustplus && !rustplus.isOperational)) return;
+        if (!rustplus || (rustplus && !rustplus.isOperational)) return;
 
         if (instance.blacklist['discordIds'].includes(message.author.id) &&
             Object.values(instance.channelId).includes(message.channelId)) {
