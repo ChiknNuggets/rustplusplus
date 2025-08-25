@@ -32,7 +32,7 @@ jobs:
     - name: Fix imports in dist (replace .ts with .js)
       run: |
        set -euo pipefail
-       find . -type f -name "*.js" -exec sed -i -E 's/\.ts(["\047])/.js\1/g' {} +
+       find src -type f -name "*.js" -exec sed -i "s/require(\(.*\)index\.ts/require(\1index/g" {} +
     - run: npx tsc
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
