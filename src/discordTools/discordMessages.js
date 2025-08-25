@@ -410,7 +410,7 @@ module.exports = {
                 "omw": "On my way",
                 "1hp": "1 H P",
                 "hp": "H P",
-                "ull", "you'll"
+                "ull", "you'll",
             };
             
             const correctedMessage = message.message
