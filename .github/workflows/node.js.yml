@@ -26,14 +26,16 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
-   # - run: npm ci
-    - run: npm install
-    - run: npm test
-    - name: Fix imports in dist (replace .ts with .js)
+    - name: Install Node Packages
+      run: npm install
+    - name: Fix imports in src (replace .ts with .js)
       run: |
        set -euo pipefail
        find src -type f -name "*.js" -exec sed -i "s/require(\(.*\)index\.ts/require(\1index/g" {} +
-    - run: npx tsc
+    - name: Build Typescript
+      run: npx tsc
+    - name: Copy Source to Dist folder
+      run: cp src/ dist/ -r
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
