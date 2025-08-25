@@ -253,6 +253,10 @@ module.exports = async (client, interaction) => {
                 instance.generalSettings.smartSwitchNotifyInGameWhenChangedFromDiscord)]
         });
     }
+    else if (interaction.customId === 'TeamChatVoice') {
+        const modal = DiscordModals.getTeamChatVoiceModal(guildId);
+        await interaction.showModal(modal);
+    }
     else if (interaction.customId === 'LeaderCommandEnabled') {
         instance.generalSettings.leaderCommandEnabled = !instance.generalSettings.leaderCommandEnabled;
         client.setInstance(guildId, instance);

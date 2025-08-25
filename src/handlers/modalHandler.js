@@ -29,6 +29,7 @@ const Scrape = require('../util/scrape.js');
 module.exports = async (client, interaction) => {
     const instance = client.getInstance(interaction.guildId);
     const guildId = interaction.guildId;
+    const rustplus = client.rustplusInstances[guildId];
 
     const verifyId = Math.floor(100000 + Math.random() * 900000);
     client.logInteraction(interaction, verifyId, 'userModal');
@@ -362,6 +363,19 @@ module.exports = async (client, interaction) => {
         }));
 
         await DiscordMessages.sendTrackerMessage(interaction.guildId, ids.trackerId);
+    }
+    else if (interaction.customId === 'TeamChatVoice') {
+        let steamId = interaction.fields.getTextInputValue('TeamChatVoiceSteamId').trim();
+        if (steamId === '') {
+            steamId = null;
+        }
+        instance.generalSettings.teamChatVoiceSteamId = steamId;
+        client.setInstance(guildId, instance);
+        if (rustplus) rustplus.generalSettings.teamChatVoiceSteamId = steamId;
+        client.log(client.intlGet(null, 'infoCap'), client.intlGet(null, 'modalValueChange', {
+            id: `${verifyId}`,
+            value: `${steamId}`
+        }));
     }
     else if (interaction.customId.startsWith('TrackerRemovePlayer')) {
         const ids = JSON.parse(interaction.customId.replace('TrackerRemovePlayer', ''));

@@ -201,6 +201,23 @@ async function setupGeneralSettings(client, guildId, channel) {
     await client.messageSend(channel, {
         embeds: [DiscordEmbeds.getEmbed({
             color: Constants.COLOR_SETTINGS,
+            title: client.intlGet(guildId, 'teamChatVoiceSetting'),
+            thumbnail: `attachment://settings_logo.png`,
+            fields: [{
+                name: client.intlGet(guildId, 'steamId'),
+                value: instance.generalSettings.teamChatVoiceSteamId ?
+                    instance.generalSettings.teamChatVoiceSteamId : client.intlGet(guildId, 'none'),
+                inline: true
+            }]
+        })],
+        components: [DiscordButtons.getTeamChatVoiceButton(guildId)],
+        files: [new Discord.AttachmentBuilder(
+            Path.join(__dirname, '..', 'resources/images/settings_logo.png'))]
+    });
+
+    await client.messageSend(channel, {
+        embeds: [DiscordEmbeds.getEmbed({
+            color: Constants.COLOR_SETTINGS,
             title: client.intlGet(guildId, 'shouldLeaderCommandEnabledSetting'),
             thumbnail: `attachment://settings_logo.png`,
         })],
