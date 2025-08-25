@@ -381,7 +381,6 @@ module.exports = {
         if (message.message.includes('@everyone')) {
             content.content = '@everyone';
         }
-        const instance = client.getInstance(rustplus.guildId);
 
         if (instance.generalSettings.teamChatVoiceSteamId &&
             instance.generalSettings.teamChatVoiceSteamId === message.steamId.toString()) {
