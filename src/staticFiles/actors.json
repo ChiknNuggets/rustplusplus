@@ -8,8 +8,8 @@
         "female": "Nina"
     },
     "en":{
-        "male": "Brian",
-        "female": "Joanna"
+        "male": "en-AU-Wavenet-B",
+        "female": "en-GB-Wavenet-B"
     },
     "es":{
         "male": "Miguel",
