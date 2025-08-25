@@ -385,6 +385,15 @@ module.exports = {
             }));
     },
 
+    getTeamChatVoiceButton: function (guildId) {
+        return new Discord.ActionRowBuilder().addComponents(
+            module.exports.getButton({
+                customId: 'TeamChatVoice',
+                label: Client.client.intlGet(guildId, 'editCap'),
+                style: PRIMARY
+            }));
+    },
+
     getLeaderCommandEnabledButton: function (guildId, enabled) {
         return new Discord.ActionRowBuilder().addComponents(
             module.exports.getButton({

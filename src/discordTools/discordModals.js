@@ -322,6 +322,25 @@ module.exports = {
         return modal;
     },
 
+    getTeamChatVoiceModal(guildId) {
+        const modal = module.exports.getModal({
+            customId: 'TeamChatVoice',
+            title: Client.client.intlGet(guildId, 'teamChatVoiceSetting')
+        });
+
+        modal.addComponents(
+            new Discord.ActionRowBuilder().addComponents(TextInput.getTextInput({
+                customId: 'TeamChatVoiceSteamId',
+                label: Client.client.intlGet(guildId, 'steamId'),
+                value: '',
+                style: Discord.TextInputStyle.Short,
+                required: false
+            }))
+        );
+
+        return modal;
+    },
+
     getTrackerRemovePlayerModal(guildId, trackerId) {
         const instance = Client.client.getInstance(guildId);
         const tracker = instance.trackers[trackerId];
