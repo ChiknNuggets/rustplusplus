@@ -19,13 +19,7 @@
 */
 
 const DiscordMessages = require('../discordTools/discordMessages.js');
-const DiscordVoice = require('../discordTools/discordVoice.js');
 
 module.exports = async function (rustplus, client, message) {
-    const instance = client.getInstance(rustplus.guildId);
     await DiscordMessages.sendTeamChatMessage(rustplus.guildId, message);
-    if (instance.generalSettings.teamChatVoiceSteamId &&
-        instance.generalSettings.teamChatVoiceSteamId === message.steamId.toString()) {
-        await DiscordVoice.sendDiscordVoiceMessage(rustplus.guildId, message.message, true);
-    }
 }
