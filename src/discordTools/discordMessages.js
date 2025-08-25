@@ -28,6 +28,7 @@ const DiscordEmbeds = require('./discordEmbeds.js');
 const DiscordSelectMenus = require('./discordSelectMenus.js');
 const DiscordTools = require('./discordTools.js');
 const Scrape = require('../util/scrape.js');
+const DiscordVoice = require('./discordVoice.js');
 
 module.exports = {
     sendMessage: async function (guildId, content, messageId, channelId, interaction = null) {
@@ -380,7 +381,45 @@ module.exports = {
         if (message.message.includes('@everyone')) {
             content.content = '@everyone';
         }
+        const instance = client.getInstance(rustplus.guildId);
 
+        if (instance.generalSettings.teamChatVoiceSteamId &&
+            instance.generalSettings.teamChatVoiceSteamId === message.steamId.toString()) {
+            const corrections = {
+                "ill": "I'll",
+                "im": "I'm",
+                "dont": "don't",
+                "cant": "can't",
+                "id": "I'd",
+                "ive": "I've",
+                "aint": "ain't",
+                "wanna": "want to",
+                "gonna": "going to",
+                "aight": "alright",
+                "u": "you",
+                "tho": "though",
+                "wut": "what",
+                "brb": "be right back",
+                "ty": "thank you",
+                "np": "no problem",
+                "ye": "yeah",
+                "alr": "alright"
+                "aks": "a K's",
+                "ak": "A K",
+                "nvg": "night vision",
+                "omw": "On my way",
+                "1hp": "1 H P",
+                "hp": "H P",
+                "ull", "you'll"
+            };
+            
+            const correctedMessage = message.message
+                .split(" ")
+                .map(word => corrections[word.toLowerCase()] || word) 
+                .join(" ");
+        
+            await DiscordVoice.sendDiscordVoiceMessage(rustplus.guildId, message.message);
+        }
         await module.exports.sendMessage(guildId, content, null, instance.channelId.teamchat);
     },
 
