@@ -635,6 +635,7 @@
     "shouldSmartAlarmNotifyNotConnectedSetting": "Should Smart Alarms notify even if they are not setup on the connected rust server?",
     "shouldSmartAlarmsNotifyInGameSetting": "Should Smart Alarms notify In-Game?",
     "shouldSmartSwitchNotifyInGameWhenChangedFromDiscord": "Should Smart Switches and Smart Switch Groups notify In-Game when they are changed from discord?",
+    "teamChatVoiceSetting": "Set team chat voice Steam ID:",
     "showingBlacklist": "Showing the blacklist.",
     "showingSubscriptionList": "Showing the subscription list.",
     "shredder": "Shredder",

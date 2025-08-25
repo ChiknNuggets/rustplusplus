@@ -18,6 +18,7 @@
 
 */
 const DiscordVoice = require('../discordTools/discordVoice.js');
+const Translate = require('translate');
 
 module.exports = {
     name: 'messageCreate',
@@ -25,13 +26,23 @@ module.exports = {
         if (message.guild) return;
         if (message.author.bot) return;
 
+        let speakText = message.cleanContent;
+        if (/[\u3400-\u9FBF]/.test(message.cleanContent)) {
+            try {
+                speakText = await Translate(message.cleanContent, { from: 'zh', to: 'en' });
+            }
+            catch (e) {
+                client.log(client.intlGet(null, 'infoCap'), `Translation failed: ${e.message}`);
+            }
+        }
+
         for (const [guildId, rustplus] of Object.entries(client.rustplusInstances)) {
             if (!rustplus || !rustplus.isOperational) continue;
 
             const instance = client.getInstance(guildId);
             if (instance && instance.blacklist['discordIds'].includes(message.author.id)) continue;
 
-            await DiscordVoice.sendDiscordVoiceMessage(guildId, message.cleanContent);
+            await DiscordVoice.sendDiscordVoiceMessage(guildId, speakText);
         }
 
         client.log(client.intlGet(null, 'infoCap'), client.intlGet(null, 'logDiscordMessage', {
