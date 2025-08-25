@@ -8,17 +8,17 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
-
+env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Automatically provided token with repo scope
+          TAG: ${{ github.ref_name }} # The name of the pushed tag (e.g., v1.0.0)
 jobs:
   build:
-
+    name: Create Release
     runs-on: ubuntu-latest
-
     strategy:
       matrix:
         node-version: [18.x, 20.x, 22.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
     steps:
     - uses: actions/checkout@v4
     - name: Use Node.js ${{ matrix.node-version }}
@@ -30,3 +30,14 @@ jobs:
     - run: npm install
     - run: npm test
     - run: npx tsc
+    - name: Create Release
+      id: create_release
+      uses: comnoco/create-release@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+
