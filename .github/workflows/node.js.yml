@@ -35,7 +35,7 @@ jobs:
       with:
         name: build-output
         path: |
-          dist/**            # The compiled build
-          package.json       # needed for npm install
-          package-lock.json  # optional but recommended
+          dist/**
+          package.json
+          package-lock.json
 
