@@ -403,7 +403,7 @@ module.exports = {
                 "ty": "thank you",
                 "np": "no problem",
                 "ye": "yeah",
-                "alr": "alright"
+                "alr": "alright",
                 "aks": "a K's",
                 "ak": "A K",
                 "nvg": "night vision",
