@@ -26,6 +26,6 @@ module.exports = async function (rustplus, client, message) {
     await DiscordMessages.sendTeamChatMessage(rustplus.guildId, message);
     if (instance.generalSettings.teamChatVoiceSteamId &&
         instance.generalSettings.teamChatVoiceSteamId === message.steamId.toString()) {
-        await DiscordVoice.sendDiscordVoiceMessage(rustplus.guildId, message.message);
+        await DiscordVoice.sendDiscordVoiceMessage(rustplus.guildId, message.message, true);
     }
 }

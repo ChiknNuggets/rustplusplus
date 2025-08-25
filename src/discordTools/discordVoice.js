@@ -23,9 +23,9 @@ const Actors = require('../staticFiles/actors.json');
 const Client = require('../../index.ts');
 
 module.exports = {
-    sendDiscordVoiceMessage: async function (guildId, text) {
+    sendDiscordVoiceMessage: async function (guildId, text, altVoice = false) {
         const connection = getVoiceConnection(guildId);
-        const voice = await this.getVoice(guildId);
+        const voice = await this.getVoice(guildId, altVoice);
         const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(text)}`;
 
         if (connection) {
@@ -37,13 +37,17 @@ module.exports = {
         }
     },
 
-    getVoice: async function (guildId) {
+    getVoice: async function (guildId, altVoice = false) {
         const instance = Client.client.getInstance(guildId);
-        const gender = instance.generalSettings.voiceGender;
+        let gender = instance.generalSettings.voiceGender;
+        if (altVoice) {
+            gender = gender === 'male' ? 'female' : 'male';
+        }
         const language = instance.generalSettings.language;
 
         if (Actors[language]?.[gender] === null || Actors[language]?.[gender] === undefined) {
-            return Actors[language]?.[gender === 'male' ? 'female' : 'male'];
+            const fallbackGender = gender === 'male' ? 'female' : 'male';
+            return Actors[language]?.[fallbackGender];
         }
         else {
             return Actors[language]?.[gender];

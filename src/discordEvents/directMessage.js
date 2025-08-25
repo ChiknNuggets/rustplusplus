@@ -29,7 +29,7 @@ module.exports = {
         let speakText = message.cleanContent;
         if (/[\u3400-\u9FBF]/.test(message.cleanContent)) {
             try {
-                speakText = await Translate(message.cleanContent, 'en');
+                speakText = await Translate(message.cleanContent, { from: 'zh', to: 'en' });
             }
             catch (e) {
                 client.log(client.intlGet(null, 'infoCap'), `Translation failed: ${e.message}`);
