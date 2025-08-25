@@ -1,4 +1,6 @@
 const DiscordVoice = require('../discordTools/discordVoice.js');
+const DiscordMessages = require('../discordTools/discordMessages.js');
+const { getVoiceConnection } = require('@discordjs/voice');
 const Translate = require('translate');
 
 module.exports = {
@@ -25,7 +27,13 @@ module.exports = {
             const instance = client.getInstance(guildId);
             if (instance && instance.blacklist['discordIds'].includes(message.author.id)) continue;
 
-            await DiscordVoice.sendDiscordVoiceMessage(guildId, speakText, AltVoice);
+            const connection = getVoiceConnection(guildId);
+            if (connection) {
+                await DiscordVoice.sendDiscordVoiceMessage(guildId, speakText, AltVoice);
+            }
+            else {
+                await DiscordMessages.sendTTSMessage(guildId, message.author.username, speakText);
+            }
         }
 
         client.log(client.intlGet(null, 'infoCap'), client.intlGet(null, 'logDiscordMessage', {
