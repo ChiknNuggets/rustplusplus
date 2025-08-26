@@ -417,7 +417,7 @@ module.exports = {
                 .map(word => corrections[word.toLowerCase()] || word) 
                 .join(" ");
         
-            await DiscordVoice.sendDiscordVoiceMessage(rustplus.guildId, message.message);
+            await DiscordVoice.sendDiscordVoiceMessage(guildId, message.message);
         }
         await module.exports.sendMessage(guildId, content, null, instance.channelId.teamchat);
     },
