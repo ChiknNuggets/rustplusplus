@@ -34,6 +34,7 @@ const Logger = require('./Logger.js');
 const PermissionHandler = require('../handlers/permissionHandler.js');
 const RustLabs = require('../structures/RustLabs');
 const RustPlus = require('../structures/RustPlus');
+const PluginManager = require('../util/pluginManager.js');
 
 class DiscordBot extends Discord.Client {
     constructor(props) {
@@ -94,13 +95,22 @@ class DiscordBot extends Discord.Client {
             const event = require(`../discordEvents/${file}`);
 
             if (event.name === 'rateLimited') {
-                this.rest.on(event.name, (...args) => event.execute(this, ...args));
+                this.rest.on(event.name, (...args) => {
+                    event.execute(this, ...args);
+                    PluginManager.emitDiscord(event.name, this, ...args);
+                });
             }
             else if (event.once) {
-                this.once(event.name, (...args) => event.execute(this, ...args));
+                this.once(event.name, (...args) => {
+                    event.execute(this, ...args);
+                    PluginManager.emitDiscord(event.name, this, ...args);
+                });
             }
             else {
-                this.on(event.name, (...args) => event.execute(this, ...args));
+                this.on(event.name, (...args) => {
+                    event.execute(this, ...args);
+                    PluginManager.emitDiscord(event.name, this, ...args);
+                });
             }
         }
     }

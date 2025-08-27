@@ -38,6 +38,7 @@ const Map = require('../util/map.js');
 const RustPlusLite = require('../structures/RustPlusLite');
 const TeamHandler = require('../handlers/teamHandler.js');
 const Timer = require('../util/timer.js');
+const PluginManager = require('../util/pluginManager.js');
 
 const TOKENS_LIMIT = 24;        /* Per player */
 const TOKENS_REPLENISH = 3;     /* Per second */
@@ -117,7 +118,10 @@ class RustPlus extends RustPlusLib {
             Path.join(__dirname, '..', 'rustplusEvents')).filter(file => file.endsWith('.js'));
         for (const file of eventFiles) {
             const event = require(`../rustplusEvents/${file}`);
-            this.on(event.name, (...args) => event.execute(this, Client.client, ...args));
+            this.on(event.name, (...args) => {
+                event.execute(this, Client.client, ...args);
+                PluginManager.emitRustPlus(event.name, this, Client.client, ...args);
+            });
         }
     }
 

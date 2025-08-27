@@ -24,6 +24,7 @@ const DiscordTools = require('../discordTools/discordTools');
 module.exports = {
     name: 'messageCreate',
     async execute(client, message) {
+        if (!message.guild) return;
         const instance = client.getInstance(message.guild.id);
         const rustplus = client.rustplusInstances[message.guild.id];
 

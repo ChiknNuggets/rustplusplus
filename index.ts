@@ -56,6 +56,10 @@ function createMissingDirectories() {
     if (!Fs.existsSync(Path.join(__dirname, 'maps'))) {
         Fs.mkdirSync(Path.join(__dirname, 'maps'));
     }
+
+    if (!Fs.existsSync(Path.join(__dirname, 'plugins'))) {
+        Fs.mkdirSync(Path.join(__dirname, 'plugins'));
+    }
 }
 
 process.on('unhandledRejection', error => {
