@@ -119,6 +119,13 @@ class RustPlus extends RustPlusLib {
             const event = require(`../rustplusEvents/${file}`);
             this.on(event.name, (...args) => event.execute(this, Client.client, ...args));
         }
+
+        const pluginEvents = Client.client.plugins?.rustplus || {};
+        for (const [event, handlers] of Object.entries(pluginEvents)) {
+            for (const handler of handlers) {
+                this.on(event, (...args) => handler(this, Client.client, ...args));
+            }
+        }
     }
 
     loadMarkers() {

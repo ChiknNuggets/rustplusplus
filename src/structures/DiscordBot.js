@@ -72,10 +72,13 @@ class DiscordBot extends Discord.Client {
 
         this.voiceLeaveTimeouts = new Object();
 
+        this.plugins = { rustplus: {} };
+
         this.loadDiscordCommands();
         this.loadDiscordEvents();
         this.loadEnIntl();
         this.loadBotIntl();
+        this.loadPlugins();
     }
 
     loadDiscordCommands() {
@@ -101,6 +104,27 @@ class DiscordBot extends Discord.Client {
             }
             else {
                 this.on(event.name, (...args) => event.execute(this, ...args));
+            }
+        }
+    }
+
+    loadPlugins() {
+        const pluginsPath = Path.join(__dirname, '..', '..', 'plugins');
+        if (!Fs.existsSync(pluginsPath)) return;
+
+        const pluginFiles = Fs.readdirSync(pluginsPath).filter(file => file.endsWith('.js'));
+        for (const file of pluginFiles) {
+            const plugin = require(Path.join(pluginsPath, file));
+            if (plugin.discord) {
+                for (const [event, handler] of Object.entries(plugin.discord)) {
+                    this.on(event, (...args) => handler(this, ...args));
+                }
+            }
+            if (plugin.rustplus) {
+                for (const [event, handler] of Object.entries(plugin.rustplus)) {
+                    if (!this.plugins.rustplus[event]) this.plugins.rustplus[event] = [];
+                    this.plugins.rustplus[event].push(handler);
+                }
             }
         }
     }
