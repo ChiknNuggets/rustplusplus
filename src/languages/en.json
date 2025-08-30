@@ -88,6 +88,8 @@
     "channelNameInformation": "information",
     "channelNameServers": "servers",
     "channelNameSettings": "settings",
+    "channelNamePlugins": "plugins",
+    "reloadCap": "Reload",
     "channelNameStorageMonitors": "storageMonitors",
     "channelNameSwitchGroups": "switchGroups",
     "channelNameSwitches": "switches",

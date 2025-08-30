@@ -33,6 +33,52 @@ module.exports = {
         return modal;
     },
 
+    getPluginConfigModal(guildId, pluginName) {
+        const instance = Client.client.getInstance(guildId);
+        const identifier = JSON.stringify({ plugin: pluginName });
+        const settings = (instance.pluginSettings && instance.pluginSettings[pluginName]) || {};
+
+        const plugin = Client.client.pluginManager.plugins.find(p => p.name === pluginName);
+        const schema = (plugin && plugin.mod && plugin.mod.configSchema) || null;
+
+        const modal = module.exports.getModal({
+            customId: `PluginConfig${identifier}`,
+            title: `Config: ${plugin?.displayName || pluginName}`
+        });
+
+        if (schema && typeof schema === 'object') {
+            // Render inputs for each schema field
+            for (const [key, def] of Object.entries(schema)) {
+                const label = (typeof def.label === 'string' && def.label) || key;
+                const value = settings[key] !== undefined && settings[key] !== null ? `${settings[key]}` : (def.default !== undefined ? `${def.default}` : '');
+                const required = !!def.required;
+                modal.addComponents(
+                    new Discord.ActionRowBuilder().addComponents(TextInput.getTextInput({
+                        customId: `PluginField_${key}`,
+                        label: label,
+                        value: value,
+                        style: Discord.TextInputStyle.Short,
+                        required: required
+                    }))
+                );
+            }
+        }
+        else {
+            // Fallback generic single text input
+            modal.addComponents(
+                new Discord.ActionRowBuilder().addComponents(TextInput.getTextInput({
+                    customId: 'PluginField_value',
+                    label: 'Value',
+                    value: settings.value ? `${settings.value}` : '',
+                    style: Discord.TextInputStyle.Short,
+                    required: false
+                }))
+            );
+        }
+
+        return modal;
+    },
+
     getServerEditModal(guildId, serverId) {
         const instance = Client.client.getInstance(guildId);
         const server = instance.serverList[serverId];

@@ -63,6 +63,45 @@ module.exports = async (client, interaction) => {
                 guildId, ids.setting, setting.discord, setting.inGame, setting.voice)]
         });
     }
+    else if (interaction.customId.startsWith('PluginToggle')) {
+        const ids = JSON.parse(interaction.customId.replace('PluginToggle', ''));
+        const pluginName = ids.plugin;
+
+        if (!instance.pluginSettings) instance.pluginSettings = {};
+        const current = instance.pluginSettings[pluginName]?.enabled ?? true;
+        instance.pluginSettings[pluginName] = { enabled: !current };
+        client.setInstance(guildId, instance);
+
+        client.log(client.intlGet(null, 'infoCap'), `Plugin ${pluginName} enabled: ${!current}`);
+
+        await client.interactionUpdate(interaction, {
+            components: [
+                require('../discordTools/discordButtons').getPluginToggleAndConfigRow(
+                    guildId, pluginName, !current)
+            ]
+        });
+    }
+    else if (interaction.customId.startsWith('PluginConfig')) {
+        const ids = JSON.parse(interaction.customId.replace('PluginConfig', ''));
+        const pluginName = ids.plugin;
+
+        const modal = require('../discordTools/discordModals').getPluginConfigModal(guildId, pluginName);
+        await interaction.showModal(modal);
+    }
+    else if (interaction.customId === 'PluginsReload') {
+        // Reload plugin modules and repaint the panel
+        try {
+            // Prevent updating a message that may be deleted during repaint
+            await interaction.deferUpdate();
+
+            client.pluginManager.unloadPlugins();
+            client.pluginManager.loadPlugins();
+            await require('../discordTools/SetupPluginsPanel')(client, interaction.guild, { force: true });
+            client.log(client.intlGet(null, 'infoCap'), 'Plugins reloaded');
+        } catch (e) {
+            client.log(client.intlGet(null, 'errorCap'), `Plugins reload failed: ${e?.stack || e}`, 'error');
+        }
+    }
     else if (interaction.customId.startsWith('InGameNotification')) {
         const ids = JSON.parse(interaction.customId.replace('InGameNotification', ''));
         const setting = instance.notificationSettings[ids.setting];

@@ -24,5 +24,11 @@ module.exports = {
         if (!rustplus.isServerAvailable()) return rustplus.deleteThisRustplusInstance();
 
         rustplus.log(client.intlGet(null, 'connectingCap'), client.intlGet(null, 'connectingToServer'));
+
+        // Plugin hook: connecting
+        try {
+            await client.pluginManager.emit('onConnecting', { rustplus, client });
+        }
+        catch (_) { }
     },
 };

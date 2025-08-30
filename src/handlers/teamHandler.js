@@ -46,6 +46,16 @@ module.exports = {
             if (instance.generalSettings.connectionNotify) await rustplus.sendInGameMessage(str);
             rustplus.log(client.intlGet(null, 'infoCap'), str);
             rustplus.updateConnections(steamId, str);
+
+            // Plugin hook: player left team
+            try {
+                await client.pluginManager.emit('onPlayerLeftTeam', {
+                    rustplus,
+                    client,
+                    player: { steamId, name: player.name }
+                });
+            }
+            catch (_) { }
         }
 
         for (const steamId of newPlayers) {
@@ -57,6 +67,16 @@ module.exports = {
                     if (instance.generalSettings.connectionNotify) await rustplus.sendInGameMessage(str);
                     rustplus.log(client.intlGet(null, 'infoCap'), str);
                     rustplus.updateConnections(steamId, str);
+
+                    // Plugin hook: player joined team
+                    try {
+                        await client.pluginManager.emit('onPlayerJoinedTeam', {
+                            rustplus,
+                            client,
+                            player: { steamId, name: player.name }
+                        });
+                    }
+                    catch (_) { }
                 }
             }
         }
@@ -79,6 +99,18 @@ module.exports = {
                             name: player.name,
                             location: player.pos
                         });
+
+                        // Plugin hook: player death
+                        try {
+                            await client.pluginManager.emit('onPlayerDeath', {
+                                rustplus,
+                                client,
+                                player: { steamId: player.steamId, name: player.name },
+                                location: player.pos,
+                                text: str
+                            });
+                        }
+                        catch (_) { }
                     }
 
                     if (player.isGoneAfk(playerUpdated)) {
@@ -87,6 +119,16 @@ module.exports = {
                             rustplus.sendInGameMessage(str);
                             rustplus.log(client.intlGet(null, 'infoCap'), str);
                         }
+
+                        // Plugin hook: AFK start
+                        try {
+                            await client.pluginManager.emit('onPlayerAfkStart', {
+                                rustplus,
+                                client,
+                                player: { steamId: player.steamId, name: player.name }
+                            });
+                        }
+                        catch (_) { }
                     }
 
                     if (player.isAfk() && player.isMoved(playerUpdated)) {
@@ -99,6 +141,18 @@ module.exports = {
                             rustplus.sendInGameMessage(str);
                             rustplus.log(client.intlGet(null, 'infoCap'), str);
                         }
+
+                        // Plugin hook: AFK return
+                        try {
+                            await client.pluginManager.emit('onPlayerAfkReturn', {
+                                rustplus,
+                                client,
+                                player: { steamId: player.steamId, name: player.name },
+                                duration: player.getAfkTime('dhs'),
+                                durationSeconds: player.getAfkSeconds()
+                            });
+                        }
+                        catch (_) { }
                     }
 
                     if (player.isGoneOnline(playerUpdated)) {
@@ -112,6 +166,16 @@ module.exports = {
                                 server: server.title
                             }));
                         rustplus.updateConnections(player.steamId, str);
+
+                        // Plugin hook: player connected (online)
+                        try {
+                            await client.pluginManager.emit('onPlayerConnected', {
+                                rustplus,
+                                client,
+                                player: { steamId: player.steamId, name: player.name }
+                            });
+                        }
+                        catch (_) { }
                     }
 
                     if (player.isGoneOffline(playerUpdated)) {
@@ -125,6 +189,16 @@ module.exports = {
                                 server: server.title
                             }));
                         rustplus.updateConnections(player.steamId, str);
+
+                        // Plugin hook: player disconnected (offline)
+                        try {
+                            await client.pluginManager.emit('onPlayerDisconnected', {
+                                rustplus,
+                                client,
+                                player: { steamId: player.steamId, name: player.name }
+                            });
+                        }
+                        catch (_) { }
                     }
                     break;
                 }

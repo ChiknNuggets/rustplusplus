@@ -66,6 +66,16 @@ async function messageBroadcastTeamChanged(rustplus, client, message) {
     const changed = rustplus.team.isLeaderSteamIdChanged(message.broadcast.teamChanged.teamInfo);
     rustplus.team.updateTeam(message.broadcast.teamChanged.teamInfo);
     if (changed) rustplus.updateLeaderRustPlusLiteInstance();
+
+    // Plugin hook: team changed
+    try {
+        await client.pluginManager.emit('onTeamChanged', {
+            rustplus,
+            client,
+            teamInfo: message.broadcast.teamChanged.teamInfo
+        });
+    }
+    catch (_) { /* handled in manager */ }
 }
 
 async function messageBroadcastTeamMessage(rustplus, client, message) {
@@ -112,12 +122,35 @@ async function messageBroadcastTeamMessage(rustplus, client, message) {
     }
 
     const isCommand = await CommandHandler.inGameCommandHandler(rustplus, client, message);
-    if (isCommand) return;
+    if (isCommand) {
+        // Plugin hook: chat message that was a command
+        try {
+            await client.pluginManager.emit('onInGameChat', {
+                rustplus,
+                client,
+                message: message.broadcast.teamMessage.message,
+                isCommand: true
+            });
+        }
+        catch (_) { }
+        return;
+    }
 
     rustplus.log(client.intlGet(null, 'infoCap'), client.intlGet(null, `logInGameMessage`, {
         message: message.broadcast.teamMessage.message.message,
         user: `${message.broadcast.teamMessage.message.name} (${steamId})`
     }));
+
+    // Plugin hook: regular in-game chat message
+    try {
+        await client.pluginManager.emit('onInGameChat', {
+            rustplus,
+            client,
+            message: message.broadcast.teamMessage.message,
+            isCommand: false
+        });
+    }
+    catch (_) { }
 
     TeamChatHandler(rustplus, client, message.broadcast.teamMessage.message);
 }
@@ -166,6 +199,17 @@ async function messageBroadcastEntityChangedSmartSwitch(rustplus, client, messag
     DiscordMessages.sendSmartSwitchMessage(rustplus.guildId, serverId, entityId);
     SmartSwitchGroupHandler.updateSwitchGroupIfContainSwitch(
         client, rustplus.guildId, serverId, entityId);
+
+    // Plugin hook: smart switch state changed
+    try {
+        await client.pluginManager.emit('onSmartSwitchChanged', {
+            rustplus,
+            client,
+            entityId,
+            active
+        });
+    }
+    catch (_) { }
 }
 
 async function messageBroadcastEntityChangedSmartAlarm(rustplus, client, message) {
@@ -192,6 +236,17 @@ async function messageBroadcastEntityChangedSmartAlarm(rustplus, client, message
     }
 
     DiscordMessages.sendSmartAlarmMessage(rustplus.guildId, rustplus.serverId, entityId);
+
+    // Plugin hook: smart alarm state changed (includes triggers)
+    try {
+        await client.pluginManager.emit('onSmartAlarmState', {
+            rustplus,
+            client,
+            entityId,
+            active
+        });
+    }
+    catch (_) { }
 }
 
 async function messageBroadcastEntityChangedStorageMonitor(rustplus, client, message) {
@@ -230,6 +285,17 @@ async function messageBroadcastEntityChangedStorageMonitor(rustplus, client, mes
         client.setInstance(rustplus.guildId, instance);
 
         await DiscordMessages.sendStorageMonitorMessage(rustplus.guildId, serverId, entityId);
+
+        // Plugin hook: storage monitor updated
+        try {
+            await client.pluginManager.emit('onStorageMonitorUpdate', {
+                rustplus,
+                client,
+                entityId,
+                payload: rustplus.storageMonitors[entityId]
+            });
+        }
+        catch (_) { }
     }
 }
 
@@ -262,12 +328,43 @@ async function updateToolCupboard(rustplus, client, message) {
                     device: server.storageMonitors[entityId].name
                 }));
             }
+
+            // Plugin hook: Tool Cupboard started decaying
+            try {
+                await client.pluginManager.emit('onToolCupboardDecayingStart', {
+                    rustplus,
+                    client,
+                    entityId
+                });
+            }
+            catch (_) { }
         }
         else if (info.entityInfo.payload.protectionExpiry !== 0) {
             server.storageMonitors[entityId].decaying = false;
+
+            // Plugin hook: Tool Cupboard stopped decaying
+            try {
+                await client.pluginManager.emit('onToolCupboardDecayingStop', {
+                    rustplus,
+                    client,
+                    entityId
+                });
+            }
+            catch (_) { }
         }
         client.setInstance(rustplus.guildId, instance);
     }
 
     await DiscordMessages.sendStorageMonitorMessage(rustplus.guildId, rustplus.serverId, entityId);
+
+    // Plugin hook: storage monitor updated (tool cupboard)
+    try {
+        await client.pluginManager.emit('onStorageMonitorUpdate', {
+            rustplus,
+            client,
+            entityId,
+            payload: rustplus.storageMonitors[entityId]
+        });
+    }
+    catch (_) { }
 }

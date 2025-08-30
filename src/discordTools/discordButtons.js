@@ -43,6 +43,60 @@ module.exports = {
         return button;
     },
 
+    getPluginToggleButton: function (guildId, pluginName, enabled) {
+        const identifier = JSON.stringify({ plugin: pluginName });
+        return new Discord.ActionRowBuilder().addComponents(
+            module.exports.getButton({
+                customId: `PluginToggle${identifier}`,
+                label: enabled ?
+                    Client.client.intlGet(guildId, 'enabledCap') :
+                    Client.client.intlGet(guildId, 'disabledCap'),
+                style: enabled ? SUCCESS : DANGER
+            })
+        );
+    },
+
+    getPluginConfigButtons: function (guildId, pluginName) {
+        const identifier = JSON.stringify({ plugin: pluginName });
+        return new Discord.ActionRowBuilder().addComponents(
+            module.exports.getButton({
+                customId: `PluginConfig${identifier}`,
+                label: Client.client.intlGet(guildId, 'editCap'),
+                style: PRIMARY
+            })
+        );
+    },
+
+    // Single row containing both Enable/Disable and Edit buttons side by side
+    getPluginToggleAndConfigRow: function (guildId, pluginName, enabled) {
+        const idToggle = JSON.stringify({ plugin: pluginName });
+        const idConfig = JSON.stringify({ plugin: pluginName });
+        return new Discord.ActionRowBuilder().addComponents(
+            module.exports.getButton({
+                customId: `PluginToggle${idToggle}`,
+                label: enabled ?
+                    Client.client.intlGet(guildId, 'enabledCap') :
+                    Client.client.intlGet(guildId, 'disabledCap'),
+                style: enabled ? SUCCESS : DANGER
+            }),
+            module.exports.getButton({
+                customId: `PluginConfig${idConfig}`,
+                label: Client.client.intlGet(guildId, 'editCap'),
+                style: PRIMARY
+            })
+        );
+    },
+
+    getPluginsReloadButton: function (guildId) {
+        return new Discord.ActionRowBuilder().addComponents(
+            module.exports.getButton({
+                customId: 'PluginsReload',
+                label: Client.client.intlGet(guildId, 'reloadCap') || 'Reload',
+                style: PRIMARY
+            })
+        );
+    },
+
     getServerButtons: function (guildId, serverId, state = null) {
         const instance = Client.client.getInstance(guildId);
         const server = instance.serverList[serverId];

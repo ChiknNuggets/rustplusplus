@@ -27,6 +27,12 @@ module.exports = {
 
         rustplus.log(client.intlGet(null, 'errorCap'), err, 'error');
 
+        // Plugin hook: error
+        try {
+            await client.pluginManager.emit('onError', { rustplus, client, error: err });
+        }
+        catch (_) { }
+
         switch (err.code) {
             case 'ETIMEDOUT': {
                 errorTimedOut(rustplus, client, err);

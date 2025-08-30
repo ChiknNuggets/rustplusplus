@@ -69,12 +69,25 @@ module.exports = {
                 await rustplus.map.writeMap(false, true);
                 await DiscordMessages.sendServerWipeDetectedMessage(guildId, serverId);
                 await DiscordMessages.sendInformationMapMessage(guildId);
+
+                // Plugin hook: wipe detected and map updated
+                try {
+                    await client.pluginManager.emit('onWipeDetected', { rustplus, client });
+                }
+                catch (_) { }
+                try {
+                    await client.pluginManager.emit('onMapUpdated', { rustplus, client });
+                }
+                catch (_) { }
             }
             else {
                 rustplus.map = new Map(map.map, rustplus);
 
                 await rustplus.map.writeMap(false, true);
                 await DiscordMessages.sendInformationMapMessage(guildId);
+
+                // Plugin hook: map updated (no wipe)
+                try { await client.pluginManager.emit('onMapUpdated', { rustplus, client }); } catch (_) { }
             }
         }
         else {
@@ -82,6 +95,9 @@ module.exports = {
 
             await rustplus.map.writeMap(false, true);
             await DiscordMessages.sendInformationMapMessage(guildId);
+
+            // Plugin hook: first map write
+            try { await client.pluginManager.emit('onMapUpdated', { rustplus, client }); } catch (_) { }
         }
 
         if (client.rustplusReconnecting[guildId]) {
@@ -110,5 +126,11 @@ module.exports = {
         rustplus.isOperational = true;
 
         rustplus.updateLeaderRustPlusLiteInstance();
+
+        // Plugin hook: rustplus connected and operational
+        try {
+            await client.pluginManager.emit('onConnected', { rustplus, client });
+        }
+        catch (_) { }
     },
 };

@@ -229,6 +229,21 @@ module.exports = {
                 return true;
             }
 
+            // Plugin custom commands
+            try {
+                const handled = await client.pluginManager.handleInGameCommand(
+                    rustplus,
+                    client,
+                    command,
+                    { steamId: callerSteamId, name: callerName }
+                );
+                if (handled) {
+                    rustplus.logInGameCommand('Plugin', message);
+                    return true;
+                }
+            }
+            catch (_) { /* handled inside plugin manager */ }
+
             return false;
         }
 

@@ -34,6 +34,7 @@ const Logger = require('./Logger.js');
 const PermissionHandler = require('../handlers/permissionHandler.js');
 const RustLabs = require('../structures/RustLabs');
 const RustPlus = require('../structures/RustPlus');
+const PluginManager = require('../plugins/PluginManager');
 
 class DiscordBot extends Discord.Client {
     constructor(props) {
@@ -76,6 +77,10 @@ class DiscordBot extends Discord.Client {
         this.loadDiscordEvents();
         this.loadEnIntl();
         this.loadBotIntl();
+
+        // Initialize and load plugins
+        this.pluginManager = new PluginManager(this);
+        this.pluginManager.loadPlugins();
     }
 
     loadDiscordCommands() {
@@ -235,6 +240,8 @@ class DiscordBot extends Discord.Client {
         }
 
         await require('../discordTools/SetupSettingsMenu')(this, guild);
+        // Setup plugin panel in dedicated channel
+        await require('../discordTools/SetupPluginsPanel')(this, guild, { force: true });
 
         if (firstTime) await PermissionHandler.resetPermissionsAllChannels(this, guild);
 

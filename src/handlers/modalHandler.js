@@ -102,6 +102,42 @@ module.exports = async (client, interaction) => {
         /* To force search of player name via scrape */
         client.battlemetricsIntervalCounter = 0;
     }
+    else if (interaction.customId.startsWith('PluginConfig')) {
+        const ids = JSON.parse(interaction.customId.replace('PluginConfig', ''));
+        const pluginName = ids.plugin;
+        const plugin = client.pluginManager.plugins.find(p => p.name === pluginName);
+        const schema = (plugin && plugin.mod && plugin.mod.configSchema) || null;
+
+        if (!instance.pluginSettings) instance.pluginSettings = {};
+        if (!instance.pluginSettings[pluginName]) instance.pluginSettings[pluginName] = {};
+
+        if (schema && typeof schema === 'object') {
+            for (const key of Object.keys(schema)) {
+                const raw = interaction.fields.getTextInputValue(`PluginField_${key}`);
+                if (raw === undefined) continue;
+                const type = schema[key].type || 'text';
+                let val = raw;
+                if (type === 'number') {
+                    const parsed = Number(raw);
+                    if (!Number.isNaN(parsed)) val = parsed; else continue;
+                }
+                else if (type === 'bool' || type === 'boolean') {
+                    const low = raw.toLowerCase().trim();
+                    if (['true','1','yes','y','on'].includes(low)) val = true;
+                    else if (['false','0','no','n','off'].includes(low)) val = false;
+                    else continue;
+                }
+                instance.pluginSettings[pluginName][key] = val;
+            }
+        }
+        else {
+            const value = interaction.fields.getTextInputValue('PluginField_value');
+            instance.pluginSettings[pluginName].value = value || null;
+        }
+
+        client.setInstance(guildId, instance);
+        client.log(client.intlGet(null, 'infoCap'), `Plugin ${pluginName} config saved`);
+    }
     else if (interaction.customId.startsWith('SmartSwitchEdit')) {
         const ids = JSON.parse(interaction.customId.replace('SmartSwitchEdit', ''));
         const server = instance.serverList[ids.serverId];

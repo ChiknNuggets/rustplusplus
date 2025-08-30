@@ -31,6 +31,17 @@ module.exports = {
         for (const [groupId, content] of Object.entries(instance.serverList[serverId].switchGroups)) {
             if (content.switches.includes(`${switchId}`)) {
                 await DiscordMessages.sendSmartSwitchGroupMessage(guildId, serverId, groupId);
+
+                // Plugin hook: smart switch group state may have changed due to a member switch change
+                try {
+                    await client.pluginManager.emit('onSmartSwitchGroupChanged', {
+                        rustplus: client.rustplusInstances[guildId],
+                        client,
+                        groupId,
+                        serverId
+                    });
+                }
+                catch (_) { }
             }
         }
 
@@ -101,6 +112,18 @@ module.exports = {
 
         if (actionSwitches.length !== 0) {
             await DiscordMessages.sendSmartSwitchGroupMessage(guildId, serverId, groupId);
+
+            // Plugin hook: smart switch group toggled by command
+            try {
+                await client.pluginManager.emit('onSmartSwitchGroupToggled', {
+                    rustplus,
+                    client,
+                    groupId,
+                    serverId,
+                    active
+                });
+            }
+            catch (_) { }
         }
     },
 

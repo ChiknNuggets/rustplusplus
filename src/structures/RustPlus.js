@@ -280,6 +280,21 @@ class RustPlus extends RustPlusLib {
 
         this.updateEvents(event, text);
 
+        // Plugin hook: in-game high level events (cargo/heli/etc.)
+        try {
+            await Client.client.pluginManager.emit('onGameEvent', {
+                rustplus: this,
+                client: Client.client,
+                event,
+                text,
+                firstPoll,
+                image: img,
+                color: embed_color,
+                setting
+            });
+        }
+        catch (_) { /* ignore plugin errors here, already handled in manager */ }
+
         if (!firstPoll && setting.discord) {
             await DiscordMessages.sendDiscordEventMessage(this.guildId, this.serverId, text, img, embed_color);
         }

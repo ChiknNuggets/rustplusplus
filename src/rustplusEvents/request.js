@@ -24,5 +24,11 @@ module.exports = {
         if (!rustplus.isServerAvailable()) return rustplus.deleteThisRustplusInstance();
 
         /* Not used */
+
+        // Plugin hook: raw request
+        try {
+            await client.pluginManager.emit('onRequest', { rustplus, client, request });
+        }
+        catch (_) { }
     },
 };

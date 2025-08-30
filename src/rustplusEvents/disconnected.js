@@ -85,5 +85,11 @@ module.exports = {
                 rustplus.playerToken
             );
         }
+
+        // Plugin hook: rustplus disconnected
+        try {
+            await client.pluginManager.emit('onDisconnected', { rustplus, client });
+        }
+        catch (_) { }
     },
 };

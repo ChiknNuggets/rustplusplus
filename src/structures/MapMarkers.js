@@ -317,6 +317,9 @@ class MapMarkers {
                         this.client.intlGet(this.rustplus.guildId, 'newVendingMachine', { location: pos.string }),
                         null,
                         Constants.COLOR_NEW_VENDING_MACHINE);
+
+                    // Plugin hook: vending machine detected
+                    try { this.client.pluginManager.emit('onVendingMachineDetected', { rustplus: this.rustplus, client: this.client, location: pos }); } catch (_) { }
                 }
             }
 
@@ -380,6 +383,9 @@ class MapMarkers {
                             this.rustplus.isFirstPoll,
                             'small_oil_rig_logo.png');
 
+                        // Plugin hook: Heavy Scientists called at Small Oil Rig
+                        try { this.client.pluginManager.emit('onOilRigHeavyScientistsCalled', { rustplus: this.rustplus, client: this.client, size: 'small', location: oilRigLocation.location }); } catch (_) { }
+
                         if (this.crateSmallOilRigTimer) {
                             this.crateSmallOilRigTimer.stop();
                         }
@@ -415,6 +421,9 @@ class MapMarkers {
                             this.rustplus.isFirstPoll,
                             'large_oil_rig_logo.png');
 
+                        // Plugin hook: Heavy Scientists called at Large Oil Rig
+                        try { this.client.pluginManager.emit('onOilRigHeavyScientistsCalled', { rustplus: this.rustplus, client: this.client, size: 'large', location: oilRigLocation.location }); } catch (_) { }
+
                         if (this.crateLargeOilRigTimer) {
                             this.crateLargeOilRigTimer.stop();
                         }
@@ -444,6 +453,9 @@ class MapMarkers {
                         this.client.intlGet(this.rustplus.guildId, 'chinook47EntersMap', { location: pos.string }),
                         'chinook',
                         Constants.COLOR_CHINOOK47_ENTERS_MAP);
+
+                    // Plugin hook: Chinook entered map
+                    try { this.client.pluginManager.emit('onChinookEnterMap', { rustplus: this.rustplus, client: this.client, location: pos }); } catch (_) { }
                 }
                 else {
                     this.rustplus.sendEvent(
@@ -451,6 +463,9 @@ class MapMarkers {
                         this.client.intlGet(this.rustplus.guildId, 'chinook47Located', { location: pos.string }),
                         'chinook',
                         Constants.COLOR_CHINOOK47_LOCATED);
+
+                    // Plugin hook: Chinook located
+                try { this.client.pluginManager.emit('onChinookLocated', { rustplus: this.rustplus, client: this.client, location: pos }); } catch (_) { }
                 }
                 marker.ch47Type = 'crate';
             }
@@ -464,6 +479,9 @@ class MapMarkers {
                 this.timeSinceCH47WasOut = new Date();
                 this.rustplus.log(this.client.intlGet(null, 'eventCap'),
                     this.client.intlGet(null, 'chinook47LeftMap', { location: marker.location.string }));
+
+                // Plugin hook: Chinook left the map
+                try { this.client.pluginManager.emit('onChinookLeftMap', { rustplus: this.rustplus, client: this.client, location: marker.location }); } catch (_) { }
             }
 
             this.ch47s = this.ch47s.filter(e => e.id !== marker.id);
@@ -508,6 +526,9 @@ class MapMarkers {
                     'cargo',
                     Constants.COLOR_CARGO_SHIP_ENTERS_MAP);
 
+                // Plugin hook: Cargo ship entered map
+                try { this.client.pluginManager.emit('onCargoEnterMap', { rustplus: this.rustplus, client: this.client, location: pos }); } catch (_) { }
+
                 let instance = this.client.getInstance(this.rustplus.guildId);
                 this.cargoShipEgressTimers[marker.id] = new Timer.timer(
                     this.notifyCargoShipEgress.bind(this),
@@ -521,6 +542,9 @@ class MapMarkers {
                     this.client.intlGet(this.rustplus.guildId, 'cargoShipLocated', { location: pos.string }),
                     'cargo',
                     Constants.COLOR_CARGO_SHIP_LOCATED);
+
+                // Plugin hook: Cargo ship located
+                try { this.client.pluginManager.emit('onCargoLocated', { rustplus: this.rustplus, client: this.client, location: pos }); } catch (_) { }
             }
 
             this.cargoShips.push(marker);
@@ -533,6 +557,9 @@ class MapMarkers {
                 this.client.intlGet(this.rustplus.guildId, 'cargoShipLeftMap', { location: marker.location.string }),
                 'cargo',
                 Constants.COLOR_CARGO_SHIP_LEFT_MAP);
+
+            // Plugin hook: Cargo ship left map
+            try { this.client.pluginManager.emit('onCargoLeftMap', { rustplus: this.rustplus, client: this.client, location: marker.location }); } catch (_) { }
 
             if (this.cargoShipEgressTimers[marker.id]) {
                 this.cargoShipEgressTimers[marker.id].stop();
@@ -573,6 +600,9 @@ class MapMarkers {
                                 this.client.intlGet(this.rustplus.guildId, 'cargoShipDockingAtHarbor',
                                     { location: harborLocation.location }), 'cargo', Constants.COLOR_CARGO_SHIP_DOCKED
                             );
+
+                            // Plugin hook: Cargo ship docked
+                            try { this.client.pluginManager.emit('onCargoDocked', { rustplus: this.rustplus, client: this.client, location: harborLocation.location }); } catch (_) { }
                         }
                     }
                 }
@@ -588,6 +618,9 @@ class MapMarkers {
                                 this.client.intlGet(this.rustplus.guildId, 'cargoShipLeftHarbor',
                                     { location: harborLocation.location }), 'cargo', Constants.COLOR_CARGO_SHIP_DOCKED
                             );
+
+                            // Plugin hook: Cargo ship left harbor
+                            try { this.client.pluginManager.emit('onCargoLeftHarbor', { rustplus: this.rustplus, client: this.client, location: harborLocation.location }); } catch (_) { }
                         }
                     }
                 }
@@ -649,6 +682,9 @@ class MapMarkers {
                     }),
                     'heli',
                     Constants.COLOR_PATROL_HELICOPTER_ENTERS_MAP);
+
+                // Plugin hook: helicopter entered the map edge
+                try { this.client.pluginManager.emit('onHelicopterEnterMap', { rustplus: this.rustplus, client: this.client, location: pos }); } catch (_) { }
             }
             else {
                 this.rustplus.sendEvent(
@@ -658,6 +694,9 @@ class MapMarkers {
                     }),
                     'heli',
                     Constants.COLOR_PATROL_HELICOPTER_LOCATED_AT);
+
+                // Plugin hook: helicopter located inside map
+                try { this.client.pluginManager.emit('onHelicopterLocated', { rustplus: this.rustplus, client: this.client, location: pos }); } catch (_) { }
             }
 
             this.patrolHelicopters.push(marker);
@@ -677,6 +716,9 @@ class MapMarkers {
                     Constants.COLOR_PATROL_HELICOPTER_LEFT_MAP);
 
                 this.timeSincePatrolHelicopterWasOnMap = new Date();
+
+                // Plugin hook: helicopter left the map
+                try { this.client.pluginManager.emit('onHelicopterLeftMap', { rustplus: this.rustplus, client: this.client, location: marker.location }); } catch (_) { }
             }
             else {
                 this.rustplus.sendEvent(
@@ -691,6 +733,9 @@ class MapMarkers {
                 this.timeSincePatrolHelicopterWasOnMap = new Date();
 
                 this.patrolHelicopterDestroyedLocation = Map.getGridPos(marker.x, marker.y, mapSize);
+
+                // Plugin hook: helicopter taken down
+                try { this.client.pluginManager.emit('onHelicopterDown', { rustplus: this.rustplus, client: this.client, location: marker.location }); } catch (_) { }
             }
 
             this.patrolHelicopters = this.patrolHelicopters.filter(e => e.id !== marker.id);
@@ -731,6 +776,9 @@ class MapMarkers {
                 Constants.COLOR_TRAVELING_VENDOR_LOCATED_AT);
 
             this.travelingVendors.push(marker);
+
+            // Plugin hook: traveling vendor spawned
+            try { this.client.pluginManager.emit('onTravelingVendorSpawned', { rustplus: this.rustplus, client: this.client, location: pos }); } catch (_) { }
         }
         
         /* TravelingVendor markers that have left. */
@@ -744,6 +792,9 @@ class MapMarkers {
             this.timeSinceTravelingVendorWasOnMap = new Date();
 
             this.travelingVendors = this.travelingVendors.filter(e => e.id !== marker.id);
+
+            // Plugin hook: traveling vendor left
+            try { this.client.pluginManager.emit('onTravelingVendorLeft', { rustplus: this.rustplus, client: this.client, location: marker.location }); } catch (_) { }
         }
 
         /* TravelingVendor markers that still remains. */
@@ -761,6 +812,9 @@ class MapMarkers {
                         this.client.intlGet(this.rustplus.guildId, 'travelingVendorHaltedAt', { location: pos.string }),
                         'vendor',
                         Constants.COLOR_TRAVELING_VENDOR_HALTED);
+
+                    // Plugin hook: traveling vendor halted
+                    try { this.client.pluginManager.emit('onTravelingVendorHalted', { rustplus: this.rustplus, client: this.client, location: pos }); } catch (_) { }
                 }
             }
             /* If TravelingVendor is moving again */
@@ -772,6 +826,9 @@ class MapMarkers {
                         this.client.intlGet(this.rustplus.guildId, 'travelingVendorResumedAt', { location: pos.string }),
                         'vendor',
                         Constants.COLOR_TRAVELING_VENDOR_MOVING);
+
+                    // Plugin hook: traveling vendor resumed movement
+                    try { this.client.pluginManager.emit('onTravelingVendorResumed', { rustplus: this.rustplus, client: this.client, location: pos }); } catch (_) { }
                 }
             }
             travelingVendor.x = marker.x;
@@ -796,6 +853,9 @@ class MapMarkers {
             'cargo',
             Constants.COLOR_CARGO_SHIP_ENTERS_EGRESS_STAGE);
 
+        // Plugin hook: Cargo ship enters egress stage
+        try { this.client.pluginManager.emit('onCargoEgressStage', { rustplus: this.rustplus, client: this.client, location: marker.location }); } catch (_) { }
+
         if (this.cargoShipEgressTimers[id]) {
             this.cargoShipEgressTimers[id].stop();
             delete this.cargoShipEgressTimers[id];
@@ -817,6 +877,9 @@ class MapMarkers {
             this.rustplus.isFirstPoll,
             'locked_crate_small_oil_rig_logo.png');
 
+        // Plugin hook: Small Oil Rig locked crate unlocked
+        try { this.client.pluginManager.emit('onOilRigCrateUnlocked', { rustplus: this.rustplus, client: this.client, size: 'small', location: oilRigLocation }); } catch (_) { }
+
         this.crateSmallOilRigTimer.stop();
         this.crateSmallOilRigTimer = null;
         this.crateSmallOilRigLocation = null;
@@ -834,6 +897,9 @@ class MapMarkers {
             Constants.COLOR_LOCKED_CRATE_LARGE_OILRIG_UNLOCKED,
             this.rustplus.isFirstPoll,
             'locked_crate_large_oil_rig_logo.png');
+
+        // Plugin hook: Large Oil Rig locked crate unlocked
+        try { this.client.pluginManager.emit('onOilRigCrateUnlocked', { rustplus: this.rustplus, client: this.client, size: 'large', location: oilRigLocation }); } catch (_) { }
 
         this.crateLargeOilRigTimer.stop();
         this.crateLargeOilRigTimer = null;
