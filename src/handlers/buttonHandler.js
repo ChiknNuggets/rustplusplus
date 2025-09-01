@@ -68,8 +68,10 @@ module.exports = async (client, interaction) => {
         const pluginName = ids.plugin;
 
         if (!instance.pluginSettings) instance.pluginSettings = {};
-        const current = instance.pluginSettings[pluginName]?.enabled ?? true;
-        instance.pluginSettings[pluginName] = { enabled: !current };
+        const prev = instance.pluginSettings[pluginName] || {};
+        const current = prev?.enabled ?? true;
+        // Preserve existing plugin settings while toggling enabled flag
+        instance.pluginSettings[pluginName] = { ...prev, enabled: !current };
         client.setInstance(guildId, instance);
 
         client.log(client.intlGet(null, 'infoCap'), `Plugin ${pluginName} enabled: ${!current}`);
@@ -80,6 +82,27 @@ module.exports = async (client, interaction) => {
                     guildId, pluginName, !current)
             ]
         });
+
+        // Re-register slash commands to reflect plugin-enabled changes
+        try {
+            const guild = interaction.guild;
+            if (guild) {
+                await require('../discordTools/RegisterSlashCommands')(client, guild);
+            }
+        } catch (_) { /* ignore errors */ }
+
+        // Notify plugin about enable/disable if it exposes hooks
+        try {
+            const entry = client.pluginManager?.plugins?.find(p => p.name === pluginName);
+            if (entry && entry.mod) {
+                if (!current && typeof entry.mod.onEnabled === 'function') {
+                    await entry.mod.onEnabled({ client, guild: interaction.guild });
+                }
+                else if (current && typeof entry.mod.onDisabled === 'function') {
+                    await entry.mod.onDisabled({ client, guild: interaction.guild });
+                }
+            }
+        } catch (_) { /* ignore plugin hook errors */ }
     }
     else if (interaction.customId.startsWith('PluginConfig')) {
         const ids = JSON.parse(interaction.customId.replace('PluginConfig', ''));

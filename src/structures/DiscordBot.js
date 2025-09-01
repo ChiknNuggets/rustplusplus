@@ -73,14 +73,17 @@ class DiscordBot extends Discord.Client {
 
         this.voiceLeaveTimeouts = new Object();
 
-        this.loadDiscordCommands();
-        this.loadDiscordEvents();
+        // Load internationalization before plugins (plugins may log using intl)
         this.loadEnIntl();
         this.loadBotIntl();
 
-        // Initialize and load plugins
+        // Initialize and load plugins (so they can contribute slash commands)
         this.pluginManager = new PluginManager(this);
         this.pluginManager.loadPlugins();
+
+        // Load core commands/events and merge plugin-provided commands
+        this.loadDiscordCommands();
+        this.loadDiscordEvents();
     }
 
     loadDiscordCommands() {
@@ -90,6 +93,18 @@ class DiscordBot extends Discord.Client {
             const command = require(`../commands/${file}`);
             this.commands.set(command.name, command);
         }
+
+        // Merge in plugin-provided slash commands, if any
+        try {
+            const plugins = this.pluginManager?.plugins || [];
+            for (const p of plugins) {
+                const list = p.mod && Array.isArray(p.mod.slashCommands) ? p.mod.slashCommands : [];
+                for (const sc of list) {
+                    if (!sc || typeof sc.name !== 'string' || typeof sc.execute !== 'function' || typeof sc.getData !== 'function') continue;
+                    this.commands.set(sc.name, sc);
+                }
+            }
+        } catch (_) { /* ignore plugin command merge errors */ }
     }
 
     loadDiscordEvents() {
@@ -156,21 +171,22 @@ class DiscordBot extends Discord.Client {
     intlGet(guildId, id, variables = {}) {
         let intl = null;
         if (guildId && guildId !== 'en') {
-            intl = this.guildIntl[guildId];
+            intl = this.guildIntl[guildId] || null;
         }
         else {
-            if (guildId === 'en') {
-                intl = this.enIntl;
-            }
-            else {
-                intl = this.botIntl;
-            }
+            intl = (guildId === 'en') ? (this.enIntl || null) : (this.botIntl || null);
         }
 
-        return intl.formatMessage({
-            id: id,
-            defaultMessage: this.enMessages[id]
-        }, variables);
+        const intlObj = intl || this.enIntl || null;
+        if (!intlObj) {
+            // Fallback very early in startup before intl is ready
+            const tmpl = this.enMessages[id] || id;
+            try {
+                return Object.keys(variables).reduce((s, k) => s.replaceAll(`{${k}}`, variables[k]), tmpl);
+            } catch (_) { return tmpl; }
+        }
+
+        return intlObj.formatMessage({ id, defaultMessage: this.enMessages[id] }, variables);
     }
 
     build() {

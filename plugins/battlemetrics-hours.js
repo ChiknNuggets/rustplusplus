@@ -1,12 +1,12 @@
-// BattleMetrics Hours plugin
-// Usage: !hours <player name>
+// BattleMetrics BM Info plugin
+// Usage: !bm <player name>
 
 module.exports = {
   defaultEnabled: true,
-  displayName: 'BattleMetrics Hours',
-  description: "In-game command to fetch a player's total time played (24h/7d/30d/AllTime) from BattleMetrics using session and profile data.",
+  displayName: 'BattleMetrics BM',
+  description: "Fetch BM info for a player: total Rust hours (all-time), first seen (years), and previous names.",
   configSchema: {
-    command: { type: 'text', label: 'Command (without prefix)', default: 'hours' },
+    command: { type: 'text', label: 'Command (without prefix)', default: 'bm' },
     include24h: { type: 'bool', label: 'Include last 24 hours', default: true },
     include7d: { type: 'bool', label: 'Include last 7 days', default: true },
     include30d: { type: 'bool', label: 'Include last 30 days', default: true },
@@ -20,7 +20,7 @@ module.exports = {
     const settings = (instance.pluginSettings && instance.pluginSettings['battlemetrics-hours.js']) || {};
 
     const prefix = rustplus.generalSettings.prefix || '!';
-    const cmd = (settings.command || 'hours').trim().toLowerCase();
+    const cmd = (settings.command || 'bm').trim().toLowerCase();
     const expectedStart = `${prefix}${cmd}`;
     if (!command.toLowerCase().startsWith(expectedStart)) return false;
 
@@ -99,11 +99,117 @@ module.exports = {
       }
     } catch (_) { }
 
-    const msg = `BM hours for "${nameArg}": ${totals.join(' | ')}${aliasLine}`;
+    // New BM info message (4 lines)
+    let displayName = nameArg;
+    let totalHours = 'error';
+    let firstSeenYears = 'unknown';
+    let prevNames = 'None';
+
+    try {
+      const profile = await fetchPlayerProfile(playerId, client);
+      if (profile?.name) displayName = profile.name;
+      if (profile?.createdAt) firstSeenYears = yearsSince(profile.createdAt);
+    } catch (_) { /* ignore */ }
+
+    try {
+      const serverData = await fetchServerData(playerId, client);
+      const timeData = calculateHours(serverData);
+      const allRust = timeData['rust']?.playTime ? Number(timeData['rust'].playTime) : 0;
+      totalHours = allRust.toFixed(2);
+    } catch (_) { /* ignore */ }
+
+    try {
+      const aliases = await fetchAliases(playerId, client);
+      if (aliases.length) {
+        aliases.sort((a,b)=> new Date(b.lastSeen||0) - new Date(a.lastSeen||0));
+        const seen = new Set();
+        const list = [];
+        for (const a of aliases) {
+          const n = (a.name || '').trim();
+          if (!n || n.toLowerCase() === displayName.toLowerCase()) continue;
+          if (seen.has(n.toLowerCase())) continue;
+          seen.add(n.toLowerCase());
+          list.push(n);
+          if (list.length >= 4) break;
+        }
+        if (list.length) prevNames = list.join(', ');
+      }
+    } catch (_) { /* ignore */ }
+
+    const lines = [
+      `${displayName} BM Info`,
+      `Total Hours = ${totalHours}`,
+      `First Seen = ${firstSeenYears}`,
+      `Previous Names = ${prevNames}`
+    ];
+    const msg = lines.join('\n');
     await rustplus.sendInGameMessage(msg);
     client.log(client.intlGet(null, 'infoCap'), `[bm-hours] ${msg}`);
     return true;
   },
+
+  // Provide Discord slash commands directly from the plugin
+  // Exposes: /bm name:<string>
+  slashCommands: [
+    {
+      name: 'bm',
+      getData(client, guildId) {
+        const Builder = require('@discordjs/builders');
+        return new Builder.SlashCommandBuilder()
+          .setName('bm')
+          .setDescription('BattleMetrics info (hours, first seen, names) by player name')
+          .addStringOption(option => option
+            .setName('name')
+            .setDescription('The player name to search for')
+            .setRequired(true));
+      },
+      async execute(client, interaction) {
+        const DiscordEmbeds = require('../src/discordTools/discordEmbeds.js');
+        const Constants = require('../src/util/constants.js');
+
+        const verifyId = Math.floor(100000 + Math.random() * 900000);
+        client.logInteraction(interaction, verifyId, 'slashCommand');
+
+        if (!await client.validatePermissions(interaction)) return;
+        await interaction.deferReply({ ephemeral: false });
+
+        const name = interaction.options.getString('name');
+        try {
+          if (typeof module.exports.queryBMInfo !== 'function') {
+            await client.interactionEditReply(interaction, DiscordEmbeds.getActionInfoEmbed(1, 'Plugin not available.'));
+            return;
+          }
+
+          const result = await module.exports.queryBMInfo(client, interaction.guildId, name);
+          if (!result.ok) {
+            await client.interactionEditReply(interaction, DiscordEmbeds.getActionInfoEmbed(1, result.message));
+            return;
+          }
+
+          // Build embed with bullet list and profile link
+          const bullets = (Array.isArray(result.rows) ? result.rows.slice(0, 20) : [])
+            .map(r => `- ${r.name} (${Number.isFinite(r.days) ? r.days : '?'} days ago)`) 
+            .join('\n');
+
+          const profileUrl = `${Constants.BATTLEMETRICS_PROFILE_URL}${result.playerId}`;
+
+          const embed = DiscordEmbeds.getEmbed({
+            color: Constants.COLOR_DEFAULT,
+            title: `${result.displayName} BattleMetrics`,
+            url: profileUrl,
+            description: `**Total Hours:** ${result.totalHours}\n` +
+                         `**First Seen:** ${result.firstSeenYears}\n\n` +
+                         `Previous Names:\n${bullets || 'None'}\n\n` +
+                         `Profile: [${result.playerId}](${profileUrl})`
+          });
+          await client.interactionEditReply(interaction, { embeds: [embed] });
+        }
+        catch (e) {
+          await client.interactionEditReply(interaction, DiscordEmbeds.getActionInfoEmbed(1, `Error: ${e?.message || e}`));
+        }
+      }
+    }
+  ],
 };
 
 // Utilities based on jxtt-dev/battlemetrics_hour_summary
@@ -326,7 +432,7 @@ async function httpGetJson(url, client) {
 }
 
 // Exported helper for Discord slash command reuse
-module.exports.queryBMHours = async function (client, guildId, playerName) {
+module.exports.queryBMInfo = async function (client, guildId, playerName) {
   const instance = client.getInstance(guildId);
   const active = instance.activeServer;
   const bmId = active && instance.serverList[active] ? (instance.serverList[active].battlemetricsId || '') : '';
@@ -358,10 +464,49 @@ module.exports.queryBMHours = async function (client, guildId, playerName) {
     allTime = `All: ${allRust.toFixed(2)}h`;
   } catch (_) {}
 
+  // Build 4-line output
+  let displayName = playerName;
+  let totalHours = 'error';
+  let firstSeenYears = 'unknown';
+  try {
+    const profile = await fetchPlayerProfile(playerId, client);
+    if (profile?.name) displayName = profile.name;
+    if (profile?.createdAt) firstSeenYears = yearsSince(profile.createdAt);
+  } catch (_) { /* ignore */ }
+
+  try {
+    const serverData = await fetchServerData(playerId, client);
+    const timeData = calculateHours(serverData);
+    const allRust = timeData['rust']?.playTime ? Number(timeData['rust'].playTime) : 0;
+    totalHours = allRust.toFixed(2);
+  } catch (_) { /* ignore */ }
+
   const aliases = await fetchAliases(playerId, client);
-  const aliasList = aliases.map(a => a.name).slice(0, 10).join(', ');
-  const text = `BM hours for "${playerName}": ${[...totals, allTime].join(' | ')}${aliasList ? `\nAliases: ${aliasList}` : ''}`;
-  return { ok: true, message: text, playerId, aliases };
+  aliases.sort((a,b)=> new Date(b.lastSeen||0) - new Date(a.lastSeen||0));
+  const rows = [];
+  const seen = new Set();
+  for (const a of aliases) {
+    const n = (a.name || '').trim();
+    if (!n || n.toLowerCase() === displayName.toLowerCase()) continue;
+    const key = n.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const days = daysSince(a.lastSeen);
+    rows.push({ name: n, days });
+    if (rows.length >= 20) break;
+  }
+  let table = 'None';
+  if (rows.length) {
+    const header = `${'Name'.padEnd(32)} | Days Since`;
+    const body = rows.map(r => `${r.name.slice(0, 48).padEnd(32)} | ${Number.isFinite(r.days) ? r.days : '-'}`).join('\n');
+    table = '```\n' + header + '\n' + body + '\n```';
+  }
+
+  const text = `${displayName} BM Info\n` +
+               `Total Hours = ${totalHours}\n` +
+               `First Seen = ${firstSeenYears}\n` +
+               `Previous Names:\n${table}`;
+  return { ok: true, message: text, playerId, aliases, displayName, totalHours, firstSeenYears, rows };
 }
 
 async function fetchAliases(playerId, client) {
@@ -377,4 +522,29 @@ async function fetchAliases(playerId, client) {
     out.push({ name: attrs.identifier, lastSeen: attrs.lastSeen });
   }
   return out;
+}
+
+async function fetchPlayerProfile(playerId, client) {
+  const url = `${BM_API}${playerId}`;
+  const json = await httpGetJson(url, client);
+  if (!json || !json.data || !json.data.attributes) throw new Error('BattleMetrics player fetch failed');
+  const attrs = json.data.attributes || {};
+  return { name: attrs.name, createdAt: attrs.createdAt };
+}
+
+function yearsSince(dateStr) {
+  const then = new Date(dateStr).getTime();
+  const now = Date.now();
+  if (!isFinite(then)) return 'unknown';
+  const years = (now - then) / (365.25 * 24 * 3600 * 1000);
+  if (years < 0) return 'unknown';
+  return `${years.toFixed(1)} years`;
+}
+
+function daysSince(dateStr) {
+  const t = new Date(dateStr).getTime();
+  if (!isFinite(t)) return NaN;
+  const diff = Date.now() - t;
+  if (diff < 0) return NaN;
+  return Math.floor(diff / (24 * 3600 * 1000));
 }

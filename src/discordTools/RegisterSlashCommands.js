@@ -34,6 +34,26 @@ module.exports = async (client, guild) => {
         commands.push(command.getData(client, guild.id).toJSON());
     }
 
+    // Include plugin-provided slash commands, if any
+    try {
+        const plugins = client.pluginManager?.plugins || [];
+        const instance = client.getInstance(guild.id);
+        for (const p of plugins) {
+            // Respect per-guild plugin enabled state
+            const enabled = (instance && instance.pluginSettings && (p.name in instance.pluginSettings)) ?
+                !!instance.pluginSettings[p.name].enabled : (p.defaultEnabled ?? true);
+            if (!enabled) continue;
+
+            const list = p.mod && Array.isArray(p.mod.slashCommands) ? p.mod.slashCommands : [];
+            for (const sc of list) {
+                try {
+                    if (!sc || typeof sc.getData !== 'function') continue;
+                    commands.push(sc.getData(client, guild.id).toJSON());
+                } catch (_) { /* ignore poorly-formed plugin slash commands */ }
+            }
+        }
+    } catch (_) { /* ignore */ }
+
     const rest = new Rest.REST({ version: '9' }).setToken(Config.discord.token);
 
     try {
