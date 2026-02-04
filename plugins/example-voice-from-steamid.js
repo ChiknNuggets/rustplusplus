@@ -1,7 +1,7 @@
 // Example plugin: If a specific SteamID talks in team chat, speak it in Discord VC
 // Default off until configured
 
-const { createAudioPlayer, createAudioResource, getVoiceConnection } = require('@discordjs/voice');
+const { createAudioPlayer, createAudioResource, getVoiceConnection, StreamType } = require('@discordjs/voice');
 const { Readable } = require('stream');
 
 const LANGUAGE_MAP = {
@@ -81,7 +81,7 @@ module.exports = {
         body: JSON.stringify({
           input: { text },
           voice,
-          audioConfig: { audioEncoding: 'MP3' }
+          audioConfig: { audioEncoding: 'OGG_OPUS' }
         })
       });
 
@@ -94,7 +94,7 @@ module.exports = {
       const payload = await response.json();
       if (!payload?.audioContent) return;
       const buffer = Buffer.from(payload.audioContent, 'base64');
-      const resource = createAudioResource(Readable.from(buffer));
+      const resource = createAudioResource(Readable.from(buffer), { inputType: StreamType.OggOpus });
       const player = createAudioPlayer();
       connection.subscribe(player);
       player.play(resource);
