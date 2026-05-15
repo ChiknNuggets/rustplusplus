@@ -161,11 +161,13 @@ async function turnTargetsOn(rustplus, client, reason, settings) {
 }
 
 async function evaluate(rustplus, client) {
+  if (!rustplus || !client) return;
+
+  clearAfkTimer(rustplus);
+
   const settings = getSettings(client, rustplus.guildId);
   const targets = getTargetIds(settings);
   if (targets.length === 0) return;
-
-  clearAfkTimer(rustplus);
 
   const condition = getCondition(rustplus, settings);
   if (condition.met) {
@@ -183,6 +185,10 @@ async function evaluate(rustplus, client) {
       });
     }, condition.delayMs);
   }
+}
+
+async function evaluateEvent({ rustplus, client }) {
+  await evaluate(rustplus, client);
 }
 
 module.exports = {
@@ -219,12 +225,12 @@ module.exports = {
     if (rustplus) clearAfkTimer(rustplus);
   },
 
-  onConnected: evaluate,
-  onTeamChanged: evaluate,
-  onPlayerConnected: evaluate,
-  onPlayerDisconnected: evaluate,
-  onPlayerAfkStart: evaluate,
-  onPlayerAfkReturn: evaluate,
-  onPlayerJoinedTeam: evaluate,
-  onPlayerLeftTeam: evaluate
+  onConnected: evaluateEvent,
+  onTeamChanged: evaluateEvent,
+  onPlayerConnected: evaluateEvent,
+  onPlayerDisconnected: evaluateEvent,
+  onPlayerAfkStart: evaluateEvent,
+  onPlayerAfkReturn: evaluateEvent,
+  onPlayerJoinedTeam: evaluateEvent,
+  onPlayerLeftTeam: evaluateEvent
 };
