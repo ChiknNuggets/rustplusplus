@@ -201,6 +201,7 @@ function getVendorMap(client, url, exportOnly = false) {
     map,
     vendors,
     cheapestByCategory: buildCheapestByCategory(vendors),
+    profitTrades: buildProfitTrades(vendors),
     summary: summarizeVendors(vendors),
     events: recentEvents.get(guildId) || []
   };
@@ -392,6 +393,75 @@ function buildCheapestByCategory(vendors) {
   return sorted;
 }
 
+function buildProfitTrades(vendors) {
+  const orders = [];
+  for (const vendor of vendors.vendingMachines || []) {
+    for (const order of vendor.orders || []) {
+      if (!order.inStock) continue;
+      orders.push({
+        vendorId: vendor.id,
+        vendorLabel: vendor.label,
+        grid: vendor.grid,
+        location: vendor.location,
+        x: vendor.x,
+        y: vendor.y,
+        itemId: order.itemId,
+        itemName: order.itemName,
+        itemBlueprint: order.itemBlueprint,
+        currencyId: order.currencyId,
+        currencyName: order.currencyName,
+        currencyBlueprint: order.currencyBlueprint,
+        quantity: Math.max(1, order.quantity || 1),
+        cost: Math.max(1, order.cost || 1),
+        stock: order.stock || 0,
+        searchText: [order.itemName, order.currencyName, vendor.grid, vendor.location].join(' ').toLowerCase()
+      });
+    }
+  }
+
+  const routes = [];
+  for (const buy of orders) {
+    for (const sell of orders) {
+      if (buy.vendorId === sell.vendorId) continue;
+      if (buy.itemId !== sell.currencyId || buy.currencyId !== sell.itemId) continue;
+      if (!!buy.itemBlueprint !== !!sell.currencyBlueprint || !!buy.currencyBlueprint !== !!sell.itemBlueprint) continue;
+
+      const buyCostPerItem = buy.cost / buy.quantity;
+      const sellReturnPerItem = sell.quantity / sell.cost;
+      const profitPerItem = sellReturnPerItem - buyCostPerItem;
+      if (profitPerItem <= 0) continue;
+
+      const tradableItemCount = Math.min(buy.stock * buy.quantity, sell.stock * sell.cost);
+      const totalProfit = Math.floor(profitPerItem * tradableItemCount);
+      if (totalProfit <= 0) continue;
+
+      routes.push({
+        buyVendorId: buy.vendorId,
+        sellVendorId: sell.vendorId,
+        buyGrid: buy.grid,
+        sellGrid: sell.grid,
+        buyLocation: buy.location,
+        sellLocation: sell.location,
+        itemId: buy.itemId,
+        itemName: buy.itemName,
+        currencyId: buy.currencyId,
+        currencyName: buy.currencyName,
+        buyQuantity: buy.quantity,
+        buyCost: buy.cost,
+        sellQuantity: sell.quantity,
+        sellCost: sell.cost,
+        profitPerItem,
+        totalProfit,
+        tradableItemCount,
+        routeText: `Buy ${buy.quantity} ${buy.itemName} for ${buy.cost} ${buy.currencyName}, then trade ${sell.cost} ${buy.itemName} for ${sell.quantity} ${buy.currencyName}`,
+        searchText: [buy.searchText, sell.searchText, buy.itemName, buy.currencyName].join(' ').toLowerCase()
+      });
+    }
+  }
+
+  return routes.sort((a, b) => b.totalProfit - a.totalProfit || b.profitPerItem - a.profitPerItem).slice(0, 50);
+}
+
 function categorizeItem(shortName, name) {
   const value = `${shortName || ''} ${name || ''}`.toLowerCase();
   if (hasAny(value, ['rifle', 'pistol', 'smg', 'shotgun', 'lmg', 'launcher', 'm249', 'revolver', 'python', 'eoka', 'crossbow', 'bow.', 'weapon.', 'flamethrower', 'nailgun'])) return 'Guns & Weapons';
@@ -514,6 +584,10 @@ function htmlPage() {
         <div id="cheapestList" class="cheapest-list"></div>
       </section>
       <section class="card">
+        <h2>Profit trades</h2>
+        <div id="profitList" class="profit-list"></div>
+      </section>
+      <section class="card">
         <h2>Vendors</h2>
         <div id="vendorList" class="vendor-list"></div>
       </section>
@@ -542,7 +616,7 @@ function htmlPage() {
 }
 
 function appCss() {
-  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover{background:#1b2230}.shop-icon{width:32px;height:32px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 32px}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.cheap-main{min-width:0}.cheap-title,.cheap-cost{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title{font-weight:700}.cheap-cost{color:var(--muted);font-size:12px}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible}.marker.vending{background:var(--accent);border-radius:8px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:34px minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b,.item span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:10px}.toolbar{width:100%;flex-wrap:wrap}.layout{display:block;height:auto}.sidebar{height:auto}.map-panel{height:70vh}.details{top:0}.map-buttons{grid-template-columns:1fr}}`;
+  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list,.profit-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row,.profit-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover,.profit-row:hover{background:#1b2230}.shop-icon{width:32px;height:32px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 32px}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.cheap-main,.profit-main{min-width:0}.cheap-title,.cheap-cost,.profit-title,.profit-route{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title,.profit-title{font-weight:700}.cheap-cost,.profit-route{color:var(--muted);font-size:12px}.profit-gain{color:var(--good);font-size:12px;font-weight:800}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible}.marker.vending{background:var(--accent);border-radius:8px}.marker.cluster{width:34px;height:34px;background:linear-gradient(135deg,var(--accent),#f59e0b);border-radius:10px;font-weight:900}.cluster-popover{display:none;position:absolute;left:50%;top:38px;transform:translateX(-50%);width:340px;max-height:360px;overflow:auto;background:#111722;border:1px solid var(--line);border-radius:12px;padding:10px;text-align:left;box-shadow:0 12px 42px rgba(0,0,0,.65);z-index:20}.marker.cluster:hover .cluster-popover,.marker.cluster:focus .cluster-popover{display:block}.cluster-title{font-weight:900;margin-bottom:6px}.cluster-vendor{border-top:1px solid var(--line);padding:7px 0}.cluster-vendor:first-of-type{border-top:0}.cluster-items{display:grid;gap:4px;max-height:132px;overflow:auto}.cluster-item{display:grid;grid-template-columns:1fr auto;gap:8px;color:var(--muted);font-size:12px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:34px minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b,.item span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:10px}.toolbar{width:100%;flex-wrap:wrap}.layout{display:block;height:auto}.sidebar{height:auto}.map-panel{height:70vh}.details{top:0}.map-buttons{grid-template-columns:1fr}}`;
 }
 
 function appJs() {
@@ -554,7 +628,7 @@ function appJs() {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
     showOutOfStock: document.getElementById('showOutOfStock'), showPlayers: document.getElementById('showPlayers'), showMonuments: document.getElementById('showMonuments'),
-    vendorList: document.getElementById('vendorList'), cheapestList: document.getElementById('cheapestList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
+    vendorList: document.getElementById('vendorList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
     layer: document.getElementById('markerLayer'), empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast')
   };
   const headers = { 'x-vendor-map-token': token };
@@ -629,6 +703,7 @@ function appJs() {
     els.stats.innerHTML = stat(summary.vendingMachineCount, 'vending machines') + stat(summary.travelingVendorCount, 'traveling vendors') + stat(summary.inStockOrderCount, 'in-stock orders') + stat(summary.uniqueItems, 'unique items');
     const filtered = getFilteredVendors();
     renderCheapest();
+    renderProfitTrades();
     renderVendorList(filtered);
     renderMarkers(filtered);
     renderEvents(data.events || []);
@@ -679,6 +754,15 @@ function appJs() {
     return ({ 'Guns & Weapons':'🔫', 'Ammo & Explosives':'💥', 'Clothing & Armor':'🧥', 'Components':'⚙️', 'Building & Deployables':'🧱', 'Resources':'⛏️', 'Tools':'🛠️', 'Medical':'➕', 'Food & Farming':'🌽', 'Electrical':'🔌', 'Vehicles':'🚗', 'Other':'📦' })[category] || '📦';
   }
 
+
+  function renderProfitTrades(){
+    const q = els.search.value.trim().toLowerCase();
+    const routes = (state.data?.profitTrades || []).filter(route => !q || (route.searchText || '').includes(q));
+    if (!routes.length) { els.profitList.innerHTML = '<div class="muted">No profitable buy/sell routes found.</div>'; return; }
+    els.profitList.innerHTML = routes.slice(0, 12).map(route => '<div class="profit-row" data-buy-id="' + escapeHtml(route.buyVendorId) + '" data-sell-id="' + escapeHtml(route.sellVendorId) + '"><span class="shop-icon">↔️</span><div class="profit-main"><div class="profit-title">' + escapeHtml(route.itemName) + ' → +' + escapeHtml(route.totalProfit) + ' ' + escapeHtml(route.currencyName) + '</div><div class="profit-route">' + escapeHtml(route.routeText) + '</div><div class="profit-gain">Route: ' + escapeHtml(route.buyGrid || '?') + ' → ' + escapeHtml(route.sellGrid || '?') + ' · max ' + escapeHtml(route.tradableItemCount) + ' items</div></div></div>').join('');
+    els.profitList.querySelectorAll('.profit-row').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.buyId)));
+  }
+
   function renderVendorList(vendors){
     if (!vendors.length) { els.vendorList.innerHTML = '<div class="muted">No vendors match the current filters.</div>'; return; }
     els.vendorList.innerHTML = vendors.map(v => {
@@ -693,8 +777,39 @@ function appJs() {
     const map = state.data?.map || {};
     if (els.showMonuments.checked) (map.monuments || []).forEach(m => addMarker({ id:'monument-' + m.token + '-' + m.x + '-' + m.y, type:'monument', label:m.name, x:m.x, y:m.y }, null));
     if (els.showPlayers.checked) (map.players || []).forEach(p => addMarker({ id:'player-' + p.name, type:'player', label:p.name, x:p.x, y:p.y }, null));
-    vendors.forEach(v => addMarker(v, () => selectVendor(v.id)));
+    const clusters = buildVendorClusters(vendors.filter(v => v.type === 'vending'));
+    clusters.forEach(cluster => cluster.vendors.length > 1 ? addClusterMarker(cluster) : addMarker(cluster.vendors[0], () => selectVendor(cluster.vendors[0].id)));
+    vendors.filter(v => v.type !== 'vending').forEach(v => addMarker(v, () => selectVendor(v.id)));
     applyTransform();
+  }
+
+  function buildVendorClusters(vendors){
+    const remaining = vendors.slice(); const clusters = [];
+    while (remaining.length) {
+      const seed = remaining.shift(); const group = [seed];
+      for (let i = remaining.length - 1; i >= 0; i--) {
+        const other = remaining[i];
+        if (distance(seed, other) <= 55 || (seed.grid && seed.grid === other.grid && distance(seed, other) <= 95)) group.push(remaining.splice(i, 1)[0]);
+      }
+      const x = group.reduce((sum, v) => sum + (v.x || 0), 0) / group.length;
+      const y = group.reduce((sum, v) => sum + (v.y || 0), 0) / group.length;
+      clusters.push({ id:'cluster-' + group.map(v => v.id).join('-'), type:'cluster', x, y, vendors: group });
+    }
+    return clusters;
+  }
+
+  function distance(a,b){ const dx = (a.x || 0) - (b.x || 0); const dy = (a.y || 0) - (b.y || 0); return Math.sqrt(dx * dx + dy * dy); }
+
+  function addClusterMarker(cluster){
+    const pos = worldToPixels(cluster.x, cluster.y); const el = document.createElement('button');
+    el.className = 'marker cluster'; el.style.left = pos.x + 'px'; el.style.top = pos.y + 'px'; el.title = cluster.vendors.length + ' vending machines';
+    el.innerHTML = '<span>' + cluster.vendors.length + '</span>' + clusterPopoverHtml(cluster);
+    el.addEventListener('click', e => { e.stopPropagation(); selectVendor(cluster.vendors[0].id); });
+    els.layer.appendChild(el);
+  }
+
+  function clusterPopoverHtml(cluster){
+    return '<div class="cluster-popover"><div class="cluster-title">' + cluster.vendors.length + ' vending machines in this base</div>' + cluster.vendors.map(v => '<div class="cluster-vendor"><b>' + escapeHtml(v.grid || v.location || 'Vendor') + '</b><div class="cluster-items">' + (v.orders || []).filter(o => els.showOutOfStock.checked || o.inStock).map(o => '<div class="cluster-item"><span>' + escapeHtml((o.quantity || 0) + '× ' + o.itemName) + '</span><span>' + escapeHtml((o.cost || 0) + '× ' + o.currencyName) + '</span></div>').join('') + '</div></div>').join('') + '</div>';
   }
 
   function addMarker(vendor, onclick){
