@@ -200,6 +200,7 @@ function getVendorMap(client, url, exportOnly = false) {
     generatedAt: new Date().toISOString(),
     map,
     vendors,
+    cheapestByCategory: buildCheapestByCategory(vendors),
     summary: summarizeVendors(vendors),
     events: recentEvents.get(guildId) || []
   };
@@ -288,10 +289,13 @@ function normalizeVendingMachine(client, vendor) {
       orders.push({
         itemId: order.itemId,
         itemName: item.name,
+        itemShortName: item.shortName,
+        itemCategory: categorizeItem(item.shortName, item.name),
         itemIcon: item.icon,
         itemBlueprint: !!order.itemIsBlueprint,
         currencyId: order.currencyId,
         currencyName: currency.name,
+        currencyShortName: currency.shortName,
         currencyIcon: currency.icon,
         currencyBlueprint: !!order.currencyIsBlueprint,
         quantity: order.quantity || 0,
@@ -319,15 +323,93 @@ function normalizeVendingMachine(client, vendor) {
 
 function getItem(client, itemId) {
   let name = itemId == null ? 'Unknown item' : `Item ${itemId}`;
+  let shortName = null;
   let icon = null;
   try {
     if (client.items && itemId != null) {
       name = client.items.getName(itemId) || name;
+      shortName = client.items.getShortName?.(itemId) || null;
       icon = client.items.getImage?.(itemId) || client.items.getIcon?.(itemId) || null;
     }
   }
   catch (_) { /* ignore */ }
-  return { name, icon };
+  return { name, shortName, icon };
+}
+
+function buildCheapestByCategory(vendors) {
+  const cheapest = new Map();
+  for (const vendor of vendors.vendingMachines || []) {
+    for (const order of vendor.orders || []) {
+      if (!order.inStock) continue;
+      const quantity = Math.max(1, order.quantity || 1);
+      const unitCost = (order.cost || 0) / quantity;
+      const itemKey = `${order.itemId}:${order.itemBlueprint ? 'bp' : 'item'}`;
+      const key = itemKey;
+      const candidate = {
+        key,
+        itemKey,
+        itemId: order.itemId,
+        itemName: order.itemName,
+        itemShortName: order.itemShortName,
+        itemCategory: order.itemCategory,
+        itemBlueprint: order.itemBlueprint,
+        currencyId: order.currencyId,
+        currencyName: order.currencyName,
+        currencyShortName: order.currencyShortName,
+        currencyBlueprint: order.currencyBlueprint,
+        quantity: order.quantity || 0,
+        cost: order.cost || 0,
+        unitCost,
+        stock: order.stock || 0,
+        vendorId: vendor.id,
+        vendorLabel: vendor.label,
+        grid: vendor.grid,
+        location: vendor.location,
+        x: vendor.x,
+        y: vendor.y,
+        searchText: [order.itemName, order.currencyName, vendor.grid, vendor.location, order.itemShortName, order.currencyShortName].join(' ').toLowerCase()
+      };
+      const current = cheapest.get(key);
+      if (!current || candidate.unitCost < current.unitCost ||
+        (candidate.unitCost === current.unitCost && candidate.stock > current.stock)) {
+        cheapest.set(key, candidate);
+      }
+    }
+  }
+
+  const categories = {};
+  for (const offer of cheapest.values()) {
+    const category = offer.itemCategory || 'Other';
+    if (!categories[category]) categories[category] = [];
+    categories[category].push(offer);
+  }
+
+  const sorted = {};
+  for (const category of Object.keys(categories).sort((a, b) => a.localeCompare(b))) {
+    sorted[category] = categories[category].sort((a, b) =>
+      a.itemName.localeCompare(b.itemName) || a.currencyName.localeCompare(b.currencyName) || a.unitCost - b.unitCost);
+  }
+  return sorted;
+}
+
+function categorizeItem(shortName, name) {
+  const value = `${shortName || ''} ${name || ''}`.toLowerCase();
+  if (hasAny(value, ['rifle', 'pistol', 'smg', 'shotgun', 'lmg', 'launcher', 'm249', 'revolver', 'python', 'eoka', 'crossbow', 'bow.', 'weapon.', 'flamethrower', 'nailgun'])) return 'Guns & Weapons';
+  if (hasAny(value, ['ammo', 'arrow', 'rocket', 'grenade', 'shell', 'incendiary', 'hv.'])) return 'Ammo & Explosives';
+  if (hasAny(value, ['attire.', 'clothing', 'hoodie', 'pants', 'boots', 'gloves', 'helmet', 'facemask', 'jacket', 'shirt', 'kilt', 'roadsign', 'hazmat', 'armor', 'vest', 'mask', 'sunglasses'])) return 'Clothing & Armor';
+  if (hasAny(value, ['component', 'gears', 'spring', 'riflebody', 'semibody', 'smgbody', 'tarp', 'rope', 'sewing', 'sheetmetal', 'techparts', 'propanetank', 'metalblade', 'metalspring', 'roadsigns', 'fuse', 'ducttape'])) return 'Components';
+  if (hasAny(value, ['building', 'wall.', 'floor.', 'door.', 'barricade', 'ladder', 'gate', 'shutter', 'lock.', 'cupboard', 'foundation', 'embrasure', 'furnace', 'box.', 'storage', 'sign.', 'planter', 'trap', 'turret'])) return 'Building & Deployables';
+  if (hasAny(value, ['wood', 'stones', 'metal.refined', 'metal.fragments', 'sulfur', 'charcoal', 'lowgradefuel', 'cloth', 'leather', 'scrap', 'hq.metal', 'crude.oil', 'gunpowder'])) return 'Resources';
+  if (hasAny(value, ['tool.', 'pickaxe', 'hatchet', 'salvaged', 'jackhammer', 'chainsaw', 'hammer', 'toolgun', 'wiretool', 'spraycan', 'binoculars'])) return 'Tools';
+  if (hasAny(value, ['medical', 'syringe', 'bandage', 'largemedkit', 'antirad', 'radiation', 'blood'])) return 'Medical';
+  if (hasAny(value, ['food', 'apple', 'berry', 'meat', 'water', 'fish', 'corn', 'pumpkin', 'mushroom', 'chocolate', 'granolabar', 'can.', 'pie.'])) return 'Food & Farming';
+  if (hasAny(value, ['electric', 'battery', 'switch', 'generator', 'solar', 'wire', 'smart.', 'computerstation', 'camera', 'rf.', 'counter', 'timer', 'sensor', 'light.'])) return 'Electrical';
+  if (hasAny(value, ['vehicle', 'modularcar', 'car.', 'engine.', 'horse', 'snowmobile', 'submarine', 'boat', 'kayak', 'mlrs', 'drone'])) return 'Vehicles';
+  return 'Other';
+}
+
+function hasAny(value, needles) {
+  return needles.some((needle) => value.includes(needle));
 }
 
 function summarizeVendors(vendors) {
@@ -428,6 +510,10 @@ function htmlPage() {
         </div>
       </section>
       <section class="card">
+        <h2>Cheapest by category</h2>
+        <div id="cheapestList" class="cheapest-list"></div>
+      </section>
+      <section class="card">
         <h2>Vendors</h2>
         <div id="vendorList" class="vendor-list"></div>
       </section>
@@ -456,7 +542,7 @@ function htmlPage() {
 }
 
 function appCss() {
-  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list{display:grid;gap:8px}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.marker{position:absolute;min-width:26px;height:26px;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2}.marker.vending{background:var(--accent)}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b,.item span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:10px}.toolbar{width:100%;flex-wrap:wrap}.layout{display:block;height:auto}.sidebar{height:auto}.map-panel{height:70vh}.details{top:0}.map-buttons{grid-template-columns:1fr}}`;
+  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover{background:#1b2230}.shop-icon{width:32px;height:32px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 32px}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.cheap-main{min-width:0}.cheap-title,.cheap-cost{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title{font-weight:700}.cheap-cost{color:var(--muted);font-size:12px}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible}.marker.vending{background:var(--accent);border-radius:8px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:34px minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b,.item span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:10px}.toolbar{width:100%;flex-wrap:wrap}.layout{display:block;height:auto}.sidebar{height:auto}.map-panel{height:70vh}.details{top:0}.map-buttons{grid-template-columns:1fr}}`;
 }
 
 function appJs() {
@@ -468,7 +554,7 @@ function appJs() {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
     showOutOfStock: document.getElementById('showOutOfStock'), showPlayers: document.getElementById('showPlayers'), showMonuments: document.getElementById('showMonuments'),
-    vendorList: document.getElementById('vendorList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
+    vendorList: document.getElementById('vendorList'), cheapestList: document.getElementById('cheapestList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
     layer: document.getElementById('markerLayer'), empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast')
   };
   const headers = { 'x-vendor-map-token': token };
@@ -542,6 +628,7 @@ function appJs() {
     const data = state.data || {}; const summary = data.summary || {};
     els.stats.innerHTML = stat(summary.vendingMachineCount, 'vending machines') + stat(summary.travelingVendorCount, 'traveling vendors') + stat(summary.inStockOrderCount, 'in-stock orders') + stat(summary.uniqueItems, 'unique items');
     const filtered = getFilteredVendors();
+    renderCheapest();
     renderVendorList(filtered);
     renderMarkers(filtered);
     renderEvents(data.events || []);
@@ -562,6 +649,34 @@ function appJs() {
       const vendorText = [v.label, v.location, v.grid, v.type].join(' ').toLowerCase();
       return vendorText.includes(q) || (v.orders || []).some(o => o.searchText.includes(q));
     });
+  }
+
+
+  function renderCheapest(){
+    const byCategory = state.data?.cheapestByCategory || {}; const q = els.search.value.trim().toLowerCase();
+    const blocks = [];
+    Object.entries(byCategory).forEach(([category, offers]) => {
+      const visible = (offers || []).filter(o => !q || (o.searchText || '').includes(q));
+      if (!visible.length) return;
+      blocks.push('<div class="category-block"><div class="category-head"><span>' + escapeHtml(category) + '</span><span class="muted">' + visible.length + '</span></div>' + visible.slice(0, 12).map(cheapOfferHtml).join('') + (visible.length > 12 ? '<div class="cheap-row muted"><div></div><div>+' + (visible.length - 12) + ' more, narrow search to reveal</div></div>' : '') + '</div>');
+    });
+    els.cheapestList.innerHTML = blocks.length ? blocks.join('') : '<div class="muted">No in-stock vendor prices found.</div>';
+    els.cheapestList.querySelectorAll('.cheap-row[data-vendor-id]').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.vendorId)));
+  }
+
+  function cheapOfferHtml(o){
+    const title = (o.quantity || 0) + '× ' + o.itemName + (o.itemBlueprint ? ' BP' : '');
+    const cost = (o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : '') + ' at ' + (o.grid || o.location || 'unknown');
+    return '<div class="cheap-row" data-vendor-id="' + escapeHtml(o.vendorId) + '">' + squareIcon(o) + '<div class="cheap-main"><div class="cheap-title">' + escapeHtml(title) + '</div><div class="cheap-cost">' + escapeHtml(cost) + '</div></div></div>';
+  }
+
+  function squareIcon(o){
+    if (o.itemIcon) return '<span class="shop-icon"><img src="' + escapeHtml(o.itemIcon) + '" alt="" /></span>';
+    return '<span class="shop-icon">' + categoryIcon(o.itemCategory) + '</span>';
+  }
+
+  function categoryIcon(category){
+    return ({ 'Guns & Weapons':'🔫', 'Ammo & Explosives':'💥', 'Clothing & Armor':'🧥', 'Components':'⚙️', 'Building & Deployables':'🧱', 'Resources':'⛏️', 'Tools':'🛠️', 'Medical':'➕', 'Food & Farming':'🌽', 'Electrical':'🔌', 'Vehicles':'🚗', 'Other':'📦' })[category] || '📦';
   }
 
   function renderVendorList(vendors){
@@ -597,7 +712,7 @@ function appJs() {
     const orders = (v.orders || []).filter(o => els.showOutOfStock.checked || o.inStock);
     els.detailsBody.innerHTML = '<h2>' + icon(v) + ' ' + escapeHtml(v.label) + '</h2><div class="muted">' + escapeHtml(v.location || 'Unknown location') + '</div><p><span class="pill">Grid ' + escapeHtml(v.grid || '?') + '</span><span class="pill">X ' + Math.round(v.x) + '</span><span class="pill">Y ' + Math.round(v.y) + '</span></p>' + (v.type === 'traveling' ? '<p class="pill warn">' + (v.halted ? 'Halted' : 'Moving') + '</p>' : '<h2>Sell orders</h2>' + (orders.length ? orders.map(orderHtml).join('') : '<div class="muted">No visible orders. Enable out-of-stock orders to see more.</div>'));
   }
-  function orderHtml(o){ const left = escapeHtml((o.quantity || 0) + '× ' + o.itemName + (o.itemBlueprint ? ' BP' : '')); const right = escapeHtml((o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : '')); return '<div class="order ' + (o.inStock ? '' : 'out') + '"><div class="item"><b>' + left + '</b><span>Stock: ' + escapeHtml(o.stock) + '</span></div><div class="arrow">for</div><div class="item"><b>' + right + '</b><span>Currency</span></div></div>'; }
+  function orderHtml(o){ const left = escapeHtml((o.quantity || 0) + '× ' + o.itemName + (o.itemBlueprint ? ' BP' : '')); const right = escapeHtml((o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : '')); return '<div class="order ' + (o.inStock ? '' : 'out') + '">' + squareIcon(o) + '<div class="item"><b>' + left + '</b><span>Stock: ' + escapeHtml(o.stock) + '</span></div><div class="arrow">for</div><div class="item"><b>' + right + '</b><span>Currency</span></div></div>'; }
   function renderEvents(events){ els.events.innerHTML = events.length ? events.slice(0,8).map(e => '<div class="event"><b>' + escapeHtml(new Date(e.time).toLocaleTimeString()) + '</b><br>' + escapeHtml(e.text) + '</div>').join('') : 'No events yet.'; }
 
   function icon(v){ return v.type === 'traveling' ? '🚚' : v.type === 'player' ? '👤' : v.type === 'monument' ? '◆' : '🛒'; }
