@@ -25,7 +25,8 @@ module.exports = {
     bindHost: { type: 'text', label: 'Bind host', default: '127.0.0.1' },
     port: { type: 'text', label: 'Port (0 = random)', default: '0' },
     autoRefreshSeconds: { type: 'text', label: 'Auto-refresh seconds', default: '5' },
-    showOutOfStock: { type: 'bool', label: 'Show out-of-stock sell orders by default', default: false }
+    showOutOfStock: { type: 'bool', label: 'Show out-of-stock sell orders by default', default: false },
+    homeLocation: { type: 'text', label: 'Home location (x,y,radius)', default: '' }
   },
 
   onLoad: ({ client }) => {
@@ -204,8 +205,49 @@ async function handleRequest(client, req, res) {
   if (req.method === 'GET' && url.pathname === '/api/guilds') return sendJson(res, 200, listGuilds(client));
   if (req.method === 'GET' && url.pathname === '/api/vendor-map') return sendJson(res, 200, getVendorMap(client, url));
   if (req.method === 'GET' && url.pathname === '/api/export') return sendJson(res, 200, getVendorMap(client, url, true));
+  if (req.method === 'POST' && url.pathname === '/api/home') return postHome(client, url, req, res);
 
   return sendJson(res, 404, { ok: false, error: 'not found' });
+}
+
+async function postHome(client, url, req, res) {
+  const guildId = url.searchParams.get('guildId');
+  if (!guildId) return sendJson(res, 400, { ok: false, error: 'guildId required' });
+  const body = await readJson(req);
+  try {
+    const instance = client.getInstance(guildId);
+    if (!instance) return sendJson(res, 404, { ok: false, error: 'guild not found' });
+    if (!instance.pluginSettings) instance.pluginSettings = {};
+    if (!instance.pluginSettings[PLUGIN_NAME]) instance.pluginSettings[PLUGIN_NAME] = {};
+
+    if (body && body.clear === true) {
+      instance.pluginSettings[PLUGIN_NAME].homeLocation = '';
+    }
+    else {
+      const x = Number(body?.x);
+      const y = Number(body?.y);
+      const radius = Number(body?.radius || 100);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(radius) || radius <= 0) {
+        return sendJson(res, 400, { ok: false, error: 'valid x, y, and radius required' });
+      }
+      instance.pluginSettings[PLUGIN_NAME].homeLocation = `${Math.round(x)},${Math.round(y)},${Math.round(radius)}`;
+    }
+
+    client.setInstance(guildId, instance);
+    return sendJson(res, 200, { ok: true, home: parseHomeLocation(instance.pluginSettings[PLUGIN_NAME].homeLocation) });
+  }
+  catch (err) {
+    return sendJson(res, 500, { ok: false, error: err?.message || 'failed to save home' });
+  }
+}
+
+function readJson(req) {
+  return new Promise((resolve) => {
+    let data = '';
+    req.on('data', (chunk) => { data += chunk; if (data.length > 1e6) req.destroy(); });
+    req.on('end', () => { try { resolve(JSON.parse(data || '{}')); } catch (_) { resolve(null); } });
+    req.on('error', () => resolve(null));
+  });
 }
 
 function isAuthorized(url, req) {
@@ -224,7 +266,8 @@ function listGuilds(client) {
         name: guild.name,
         connected: !!(rp && rp.isConnected),
         autoRefreshSeconds: parsePositiveInt(settings.autoRefreshSeconds, 5),
-        showOutOfStock: settings.showOutOfStock === true
+        showOutOfStock: settings.showOutOfStock === true,
+        home: parseHomeLocation(settings.homeLocation)
       });
     }
   }
@@ -239,6 +282,7 @@ function getVendorMap(client, url, exportOnly = false) {
   const rustplus = client.rustplusInstances?.[guildId];
   const guild = client.guilds?.cache?.get(guildId);
   const settings = getPluginSettings(client, guildId);
+  const home = parseHomeLocation(settings.homeLocation);
   const map = buildMapPayload(client, guildId, rustplus, exportOnly);
   const vendors = buildVendorPayload(client, rustplus);
 
@@ -247,13 +291,15 @@ function getVendorMap(client, url, exportOnly = false) {
     guild: { id: guildId, name: guild?.name || guildId, connected: !!(rustplus && rustplus.isConnected) },
     config: {
       autoRefreshSeconds: parsePositiveInt(settings.autoRefreshSeconds, 5),
-      showOutOfStock: settings.showOutOfStock === true
+      showOutOfStock: settings.showOutOfStock === true,
+      home
     },
     generatedAt: new Date().toISOString(),
     map,
     vendors,
     cheapestByCategory: buildCheapestByCategory(vendors),
     profitTrades: buildProfitTrades(vendors),
+    priceChecks: buildPriceChecks(vendors, home),
     summary: summarizeVendors(vendors),
     events: recentEvents.get(guildId) || []
   };
@@ -534,6 +580,74 @@ function hasAny(value, needles) {
   return needles.some((needle) => value.includes(needle));
 }
 
+function parseHomeLocation(value) {
+  if (!value || typeof value !== 'string') return null;
+  const parts = value.split(/[ ,]+/).map((part) => Number(part.trim())).filter((part) => Number.isFinite(part));
+  if (parts.length < 2) return null;
+  return { x: parts[0], y: parts[1], radius: parts[2] && parts[2] > 0 ? parts[2] : 100 };
+}
+
+function buildPriceChecks(vendors, home) {
+  if (!home) return [];
+  const machines = vendors.vendingMachines || [];
+  const homeVendors = machines.filter((vendor) => getDistance(home.x, home.y, vendor.x, vendor.y) <= home.radius);
+  if (!homeVendors.length) return [];
+
+  const checks = [];
+  for (const homeVendor of homeVendors) {
+    for (const homeOrder of homeVendor.orders || []) {
+      if (!homeOrder.inStock) continue;
+      const homeUnitCost = (homeOrder.cost || 0) / Math.max(1, homeOrder.quantity || 1);
+      for (const competitor of machines) {
+        if (homeVendors.some((vendor) => vendor.id === competitor.id)) continue;
+        for (const competitorOrder of competitor.orders || []) {
+          if (!competitorOrder.inStock) continue;
+          if (homeOrder.itemId !== competitorOrder.itemId || homeOrder.currencyId !== competitorOrder.currencyId) continue;
+          if (!!homeOrder.itemBlueprint !== !!competitorOrder.itemBlueprint || !!homeOrder.currencyBlueprint !== !!competitorOrder.currencyBlueprint) continue;
+          const competitorUnitCost = (competitorOrder.cost || 0) / Math.max(1, competitorOrder.quantity || 1);
+          if (competitorUnitCost >= homeUnitCost) continue;
+          const cheaperBy = homeUnitCost - competitorUnitCost;
+          checks.push({
+            key: `${homeVendor.id}:${competitor.id}:${homeOrder.itemId}:${homeOrder.currencyId}`,
+            homeVendorId: homeVendor.id,
+            competitorVendorId: competitor.id,
+            itemId: homeOrder.itemId,
+            itemName: homeOrder.itemName,
+            currencyId: homeOrder.currencyId,
+            currencyName: homeOrder.currencyName,
+            homeGrid: homeVendor.grid,
+            competitorGrid: competitor.grid,
+            homeLocation: homeVendor.location,
+            competitorLocation: competitor.location,
+            homeX: homeVendor.x,
+            homeY: homeVendor.y,
+            competitorX: competitor.x,
+            competitorY: competitor.y,
+            homeQuantity: homeOrder.quantity || 0,
+            homeCost: homeOrder.cost || 0,
+            competitorQuantity: competitorOrder.quantity || 0,
+            competitorCost: competitorOrder.cost || 0,
+            homeUnitCost,
+            competitorUnitCost,
+            cheaperBy,
+            cheaperPercent: homeUnitCost > 0 ? (cheaperBy / homeUnitCost) * 100 : 0,
+            distanceFromHome: Math.round(getDistance(home.x, home.y, competitor.x, competitor.y)),
+            searchText: [homeOrder.itemName, homeOrder.currencyName, homeVendor.grid, competitor.grid, homeVendor.location, competitor.location].join(' ').toLowerCase()
+          });
+        }
+      }
+    }
+  }
+
+  return checks.sort((a, b) => b.cheaperPercent - a.cheaperPercent || b.cheaperBy - a.cheaperBy).slice(0, 50);
+}
+
+function getDistance(x1, y1, x2, y2) {
+  const dx = (x1 || 0) - (x2 || 0);
+  const dy = (y1 || 0) - (y2 || 0);
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
 function summarizeVendors(vendors) {
   const machines = vendors.vendingMachines || [];
   const traveling = vendors.travelingVendors || [];
@@ -632,6 +746,24 @@ function htmlPage() {
         </div>
       </section>
       <section class="card">
+        <h2>Home location</h2>
+        <div class="home-grid">
+          <input id="homeX" class="input" placeholder="X" />
+          <input id="homeY" class="input" placeholder="Y" />
+          <input id="homeRadius" class="input" placeholder="Radius" />
+        </div>
+        <div class="map-buttons">
+          <button id="homeFromSelected" class="btn full">Use selected vendor</button>
+          <button id="saveHome" class="btn full primary">Save home</button>
+        </div>
+        <button id="clearHome" class="btn full">Clear home</button>
+        <div id="homeStatus" class="muted">No home set.</div>
+      </section>
+      <section class="card">
+        <h2>Price undercuts</h2>
+        <div id="priceCheckList" class="price-check-list"></div>
+      </section>
+      <section class="card">
         <h2>Cheapest by category</h2>
         <div id="cheapestList" class="cheapest-list"></div>
       </section>
@@ -668,7 +800,7 @@ function htmlPage() {
 }
 
 function appCss() {
-  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list,.profit-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row,.profit-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover,.profit-row:hover{background:#1b2230}.shop-icon{width:32px;height:32px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 32px}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.cheap-main,.profit-main{min-width:0}.cheap-title,.cheap-cost,.profit-title,.profit-route{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title,.profit-title{font-weight:700}.cheap-cost,.profit-route{color:var(--muted);font-size:12px}.profit-gain{color:var(--good);font-size:12px;font-weight:800}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible}.marker.vending{background:var(--accent);border-radius:8px}.marker.cluster{width:34px;height:34px;background:linear-gradient(135deg,var(--accent),#f59e0b);border-radius:10px;font-weight:900}.cluster-popover{display:none;position:absolute;left:50%;top:38px;transform:translateX(-50%);width:340px;max-height:360px;overflow:auto;background:#111722;border:1px solid var(--line);border-radius:12px;padding:10px;text-align:left;box-shadow:0 12px 42px rgba(0,0,0,.65);z-index:20}.marker.cluster:hover .cluster-popover,.marker.cluster:focus .cluster-popover{display:block}.cluster-title{font-weight:900;margin-bottom:6px}.cluster-vendor{border-top:1px solid var(--line);padding:7px 0}.cluster-vendor:first-of-type{border-top:0}.cluster-items{display:grid;gap:4px;max-height:132px;overflow:auto}.cluster-item{display:grid;grid-template-columns:1fr auto;gap:8px;color:var(--muted);font-size:12px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:34px minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b,.item span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:10px}.toolbar{width:100%;flex-wrap:wrap}.layout{display:block;height:auto}.sidebar{height:auto}.map-panel{height:70vh}.details{top:0}.map-buttons{grid-template-columns:1fr}}`;
+  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list,.profit-list,.price-check-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row,.profit-row,.price-check-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover,.profit-row:hover,.price-check-row:hover{background:#1b2230}.shop-icon{width:32px;height:32px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 32px}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.cheap-main,.profit-main,.price-check-main{min-width:0}.cheap-title,.cheap-cost,.profit-title,.profit-route,.price-check-title,.price-check-route{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title,.profit-title,.price-check-title{font-weight:700}.cheap-cost,.profit-route,.price-check-route{color:var(--muted);font-size:12px}.profit-gain,.price-check-warn{color:var(--good);font-size:12px;font-weight:800}.price-check-warn{color:var(--warn)}.home-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px}#homeStatus{margin-top:8px}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible}.marker.vending{background:var(--accent);border-radius:8px}.marker.home{width:36px;height:36px;background:var(--good);color:#062411;border-radius:50%;font-weight:900}.marker.cluster{width:34px;height:34px;background:linear-gradient(135deg,var(--accent),#f59e0b);border-radius:10px;font-weight:900}.cluster-popover{display:none;position:absolute;left:50%;top:38px;transform:translateX(-50%);width:340px;max-height:360px;overflow:auto;background:#111722;border:1px solid var(--line);border-radius:12px;padding:10px;text-align:left;box-shadow:0 12px 42px rgba(0,0,0,.65);z-index:20}.marker.cluster:hover .cluster-popover,.marker.cluster:focus .cluster-popover{display:block}.cluster-title{font-weight:900;margin-bottom:6px}.cluster-vendor{border-top:1px solid var(--line);padding:7px 0}.cluster-vendor:first-of-type{border-top:0}.cluster-items{display:grid;gap:4px;max-height:132px;overflow:auto}.cluster-item{display:grid;grid-template-columns:1fr auto;gap:8px;color:var(--muted);font-size:12px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:34px minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b,.item span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:10px}.toolbar{width:100%;flex-wrap:wrap}.layout{display:block;height:auto}.sidebar{height:auto}.map-panel{height:70vh}.details{top:0}.map-buttons{grid-template-columns:1fr}}`;
 }
 
 function appJs() {
@@ -680,12 +812,13 @@ function appJs() {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
     showOutOfStock: document.getElementById('showOutOfStock'), showPlayers: document.getElementById('showPlayers'), showMonuments: document.getElementById('showMonuments'),
-    vendorList: document.getElementById('vendorList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
-    layer: document.getElementById('markerLayer'), empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast')
+    vendorList: document.getElementById('vendorList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), priceCheckList: document.getElementById('priceCheckList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
+    layer: document.getElementById('markerLayer'), empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast'), homeX: document.getElementById('homeX'), homeY: document.getElementById('homeY'), homeRadius: document.getElementById('homeRadius'), homeStatus: document.getElementById('homeStatus')
   };
   const headers = { 'x-vendor-map-token': token };
 
   function api(path){ return fetch(path + (path.includes('?')?'&':'?') + 'token=' + encodeURIComponent(token), { headers }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); }); }
+  function postJson(path, body){ return fetch(path + (path.includes('?')?'&':'?') + 'token=' + encodeURIComponent(token), { method:'POST', headers:{ ...headers, 'Content-Type':'application/json' }, body:JSON.stringify(body) }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); }); }
   function setStatus(text){ els.status.textContent = text; }
   function toast(text){ els.toast.textContent = text; els.toast.hidden = false; clearTimeout(els.toast._t); els.toast._t = setTimeout(() => els.toast.hidden = true, 2200); }
   function escapeHtml(value){ return String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
@@ -714,6 +847,9 @@ function appJs() {
     document.getElementById('closeDetails').addEventListener('click', () => { state.selectedId = null; els.details.classList.add('closed'); render(); });
     document.getElementById('copyLink').addEventListener('click', async () => { await navigator.clipboard.writeText(location.origin + '/?token=' + encodeURIComponent(token) + '&guildId=' + encodeURIComponent(els.guild.value)); toast('Link copied'); });
     document.getElementById('exportJson').addEventListener('click', () => { window.open('/api/export?token=' + encodeURIComponent(token) + '&guildId=' + encodeURIComponent(els.guild.value), '_blank'); });
+    document.getElementById('saveHome').addEventListener('click', saveHome);
+    document.getElementById('clearHome').addEventListener('click', clearHome);
+    document.getElementById('homeFromSelected').addEventListener('click', setHomeFromSelected);
   }
 
   async function load(){
@@ -722,6 +858,7 @@ function appJs() {
     const data = await api('/api/vendor-map?guildId=' + encodeURIComponent(els.guild.value));
     state.data = data;
     els.showOutOfStock.checked = !!data.config?.showOutOfStock;
+    syncHomeInputs(data.config?.home || null);
     renderMapImage(data.map || {});
     render();
     setStatus('Updated ' + new Date(data.generatedAt).toLocaleTimeString());
@@ -735,6 +872,7 @@ function appJs() {
       const data = await api('/api/vendor-map?guildId=' + encodeURIComponent(els.guild.value));
       const oldImage = state.data?.map?.image;
       state.data = data;
+      syncHomeInputs(data.config?.home || null, false);
       if (data.map?.image && data.map.image !== oldImage) renderMapImage(data.map);
       render();
       setStatus('Updated ' + new Date(data.generatedAt).toLocaleTimeString());
@@ -755,6 +893,7 @@ function appJs() {
     els.stats.innerHTML = stat(summary.vendingMachineCount, 'vending machines') + stat(summary.travelingVendorCount, 'traveling vendors') + stat(summary.inStockOrderCount, 'in-stock orders') + stat(summary.uniqueItems, 'unique items');
     const filtered = getFilteredVendors();
     renderCheapest();
+    renderPriceChecks();
     renderProfitTrades();
     renderVendorList(filtered);
     renderMarkers(filtered);
@@ -776,6 +915,43 @@ function appJs() {
       const vendorText = [v.label, v.location, v.grid, v.type].join(' ').toLowerCase();
       return vendorText.includes(q) || (v.orders || []).some(o => o.searchText.includes(q));
     });
+  }
+
+
+  function syncHomeInputs(home, overwrite=true){
+    if (home && overwrite) { els.homeX.value = Math.round(home.x); els.homeY.value = Math.round(home.y); els.homeRadius.value = Math.round(home.radius || 100); }
+    els.homeStatus.textContent = home ? ('Home: X ' + Math.round(home.x) + ', Y ' + Math.round(home.y) + ', radius ' + Math.round(home.radius || 100)) : 'No home set. Save coordinates or select a vendor and use it as home.';
+  }
+
+  async function saveHome(){
+    try {
+      const gid = els.guild.value;
+      const body = { x:Number(els.homeX.value), y:Number(els.homeY.value), radius:Number(els.homeRadius.value || 100) };
+      await postJson('/api/home?guildId=' + encodeURIComponent(gid), body);
+      toast('Home saved');
+      await load();
+    } catch(e) { toast('Home save failed'); setStatus('Error: ' + e.message); }
+  }
+
+  async function clearHome(){
+    try { await postJson('/api/home?guildId=' + encodeURIComponent(els.guild.value), { clear:true }); toast('Home cleared'); await load(); }
+    catch(e) { toast('Home clear failed'); setStatus('Error: ' + e.message); }
+  }
+
+  function setHomeFromSelected(){
+    const vendor = [...(state.data?.vendors?.vendingMachines || []), ...(state.data?.vendors?.travelingVendors || [])].find(v => v.id === state.selectedId);
+    if (!vendor) { toast('Select a vendor marker/list row first'); return; }
+    els.homeX.value = Math.round(vendor.x); els.homeY.value = Math.round(vendor.y); if (!els.homeRadius.value) els.homeRadius.value = 100;
+    toast('Home coordinates copied from selected vendor');
+  }
+
+  function renderPriceChecks(){
+    const q = els.search.value.trim().toLowerCase();
+    const checks = (state.data?.priceChecks || []).filter(check => !q || (check.searchText || '').includes(q));
+    if (!state.data?.config?.home) { els.priceCheckList.innerHTML = '<div class="muted">Set your home location to compare your nearby vendors against the rest of the map.</div>'; return; }
+    if (!checks.length) { els.priceCheckList.innerHTML = '<div class="muted">No cheaper competing vendors found for home-area prices.</div>'; return; }
+    els.priceCheckList.innerHTML = checks.slice(0, 16).map(check => '<div class="price-check-row" data-home-id="' + escapeHtml(check.homeVendorId) + '" data-comp-id="' + escapeHtml(check.competitorVendorId) + '"><span class="shop-icon">⚠️</span><div class="price-check-main"><div class="price-check-title">' + escapeHtml(check.itemName) + ' is cheaper elsewhere by ' + escapeHtml(check.cheaperPercent.toFixed(1)) + '%</div><div class="price-check-route">Your price: ' + escapeHtml(check.homeQuantity + '× for ' + check.homeCost + ' ' + check.currencyName) + ' at ' + escapeHtml(check.homeGrid || '?') + ' · Competitor: ' + escapeHtml(check.competitorQuantity + '× for ' + check.competitorCost + ' ' + check.currencyName) + ' at ' + escapeHtml(check.competitorGrid || '?') + '</div><div class="price-check-warn">' + escapeHtml(check.distanceFromHome) + 'm from home · click to view competitor</div></div></div>').join('');
+    els.priceCheckList.querySelectorAll('.price-check-row').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.compId)));
   }
 
 
@@ -829,6 +1005,7 @@ function appJs() {
     const map = state.data?.map || {};
     if (els.showMonuments.checked) (map.monuments || []).forEach(m => addMarker({ id:'monument-' + m.token + '-' + m.x + '-' + m.y, type:'monument', label:m.name, x:m.x, y:m.y }, null));
     if (els.showPlayers.checked) (map.players || []).forEach(p => addMarker({ id:'player-' + p.name, type:'player', label:p.name, x:p.x, y:p.y }, null));
+    if (state.data?.config?.home) addMarker({ id:'home', type:'home', label:'Home', x:state.data.config.home.x, y:state.data.config.home.y }, null);
     const clusters = buildVendorClusters(vendors.filter(v => v.type === 'vending'));
     clusters.forEach(cluster => cluster.vendors.length > 1 ? addClusterMarker(cluster) : addMarker(cluster.vendors[0], () => selectVendor(cluster.vendors[0].id)));
     vendors.filter(v => v.type !== 'vending').forEach(v => addMarker(v, () => selectVendor(v.id)));
@@ -882,8 +1059,8 @@ function appJs() {
   function orderHtml(o){ const left = escapeHtml((o.quantity || 0) + '× ' + o.itemName + (o.itemBlueprint ? ' BP' : '')); const right = escapeHtml((o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : '')); return '<div class="order ' + (o.inStock ? '' : 'out') + '">' + squareIcon(o) + '<div class="item"><b>' + left + '</b><span>Stock: ' + escapeHtml(o.stock) + '</span></div><div class="arrow">for</div><div class="item"><b>' + right + '</b><span>Currency</span></div></div>'; }
   function renderEvents(events){ els.events.innerHTML = events.length ? events.slice(0,8).map(e => '<div class="event"><b>' + escapeHtml(new Date(e.time).toLocaleTimeString()) + '</b><br>' + escapeHtml(e.text) + '</div>').join('') : 'No events yet.'; }
 
-  function icon(v){ return v.type === 'traveling' ? '🚚' : v.type === 'player' ? '👤' : v.type === 'monument' ? '◆' : '🛒'; }
-  function shortLabel(v){ if (v.type === 'vending') return v.grid || 'Vendor'; if (v.type === 'traveling') return v.halted ? 'Halted' : 'Vendor'; return v.label || ''; }
+  function icon(v){ return v.type === 'home' ? '⌂' : v.type === 'traveling' ? '🚚' : v.type === 'player' ? '👤' : v.type === 'monument' ? '◆' : '🛒'; }
+  function shortLabel(v){ if (v.type === 'home') return 'Home'; if (v.type === 'vending') return v.grid || 'Vendor'; if (v.type === 'traveling') return v.halted ? 'Halted' : 'Vendor'; return v.label || ''; }
   function worldToPixels(x,y){ if(!state.mapSize || !state.imgW || !state.imgH) return {x:0,y:0}; const effW = state.imgW - 2 * state.ocean; const effH = state.imgH - 2 * state.ocean; return { x: (x * (effW / state.mapSize)) + state.ocean, y: state.imgH - ((y * (effH / state.mapSize)) + state.ocean) }; }
   function applyTransform(){ const t = 'translate(' + state.x + 'px,' + state.y + 'px) scale(' + state.scale + ')'; els.img.style.transform = t; els.layer.style.transform = t; }
   function fitMap(){ const rect = els.map.getBoundingClientRect(); if(!state.imgW || !state.imgH || !rect.width || !rect.height) return; state.scale = Math.min(rect.width / state.imgW, rect.height / state.imgH) || 1; state.x = (rect.width - state.imgW * state.scale) / 2; state.y = (rect.height - state.imgH * state.scale) / 2; applyTransform(); }
