@@ -10,7 +10,10 @@ const PLUGIN_NAME = 'vendor-map-web.js';
 
 let server = null;
 let serverPort = null;
+let serverHost = null;
+let serverRequestedPort = null;
 let authToken = null;
+let configWatcher = null;
 const recentEvents = new Map();
 
 module.exports = {
@@ -26,11 +29,11 @@ module.exports = {
   },
 
   onLoad: ({ client }) => {
-    ensureServer(client);
+    startConfigWatcher(client);
   },
 
   onEnabled: ({ client, guild }) => {
-    ensureServer(client);
+    ensureServer(client, guild?.id);
     logUrl(client, guild?.id);
   },
 
@@ -38,6 +41,10 @@ module.exports = {
     if (server) server.close();
     server = null;
     serverPort = null;
+    serverHost = null;
+    serverRequestedPort = null;
+    if (configWatcher) clearInterval(configWatcher);
+    configWatcher = null;
     authToken = null;
     recentEvents.clear();
   },
@@ -62,7 +69,7 @@ module.exports = {
         const verifyId = Math.floor(100000 + Math.random() * 900000);
         client.logInteraction(interaction, verifyId, 'slashCommand');
         if (!await client.validatePermissions(interaction)) return;
-        ensureServer(client);
+        ensureServer(client, interaction.guildId);
         const url = getPublicUrl(interaction.guildId);
         await interaction.reply({
           ephemeral: true,
@@ -73,11 +80,18 @@ module.exports = {
   ]
 };
 
-function ensureServer(client) {
+function ensureServer(client, guildId = null) {
   if (!authToken) authToken = generateToken();
-  if (server) return;
+  startConfigWatcher(client);
 
-  const defaults = getDefaultServerConfig(client);
+  const desired = getDefaultServerConfig(client, guildId);
+  if (server) {
+    if (serverHost === desired.host && serverRequestedPort === desired.port) return;
+    closeServer();
+  }
+
+  serverHost = desired.host;
+  serverRequestedPort = desired.port;
   server = http.createServer(async (req, res) => {
     try {
       await handleRequest(client, req, res);
@@ -90,31 +104,69 @@ function ensureServer(client) {
   server.on('error', (err) => {
     server = null;
     serverPort = null;
+    serverHost = null;
+    serverRequestedPort = null;
     client.log(client.intlGet(null, 'errorCap'), `[vendor-map] server error: ${err?.message || err}`, 'error');
   });
 
-  server.listen(defaults.port, defaults.host, () => {
+  server.listen(desired.port, desired.host, () => {
     serverPort = server.address().port;
-    client.log(client.intlGet(null, 'infoCap'), `[vendor-map] listening at ${getPublicUrl()}`);
+    client.log(client.intlGet(null, 'infoCap'), `[vendor-map] listening at ${getPublicUrl()} (configured ${desired.host}:${desired.port || 'random'})`);
   });
 }
 
-function getDefaultServerConfig(client) {
-  const settings = getFirstPluginSettings(client);
+function closeServer() {
+  try { if (server) server.close(); } catch (_) { /* ignore */ }
+  server = null;
+  serverPort = null;
+  serverHost = null;
+  serverRequestedPort = null;
+}
+
+function startConfigWatcher(client) {
+  if (configWatcher) return;
+  configWatcher = setInterval(() => {
+    const preferredGuildId = getPreferredConfigGuildId(client);
+    if (!preferredGuildId) return;
+    if (!server) {
+      ensureServer(client, preferredGuildId);
+      return;
+    }
+    const desired = getDefaultServerConfig(client, preferredGuildId);
+    if (serverHost !== desired.host || serverRequestedPort !== desired.port) {
+      client.log(client.intlGet(null, 'infoCap'), `[vendor-map] restarting to apply configured bind ${desired.host}:${desired.port || 'random'}`);
+      ensureServer(client, preferredGuildId);
+    }
+  }, 5000);
+}
+
+function getDefaultServerConfig(client, guildId = null) {
+  const settings = guildId ? getPluginSettings(client, guildId) : getFirstPluginSettings(client);
   const host = String(settings.bindHost || '127.0.0.1').trim() || '127.0.0.1';
   const parsedPort = parseInt(settings.port, 10);
   return { host, port: Number.isInteger(parsedPort) && parsedPort >= 0 && parsedPort <= 65535 ? parsedPort : 0 };
 }
 
 function getFirstPluginSettings(client) {
+  const preferredGuildId = getPreferredConfigGuildId(client);
+  return preferredGuildId ? getPluginSettings(client, preferredGuildId) : {};
+}
+
+function getPreferredConfigGuildId(client) {
   try {
     for (const guild of client.guilds.cache.values()) {
-      const settings = getPluginSettings(client, guild.id);
-      if (settings) return settings;
+      const instance = client.getInstance(guild.id);
+      const settings = instance?.pluginSettings?.[PLUGIN_NAME];
+      if (settings && settings.enabled !== false && (settings.port !== undefined || settings.bindHost !== undefined)) return guild.id;
+    }
+    for (const guild of client.guilds.cache.values()) {
+      const instance = client.getInstance(guild.id);
+      const settings = instance?.pluginSettings?.[PLUGIN_NAME];
+      if (settings && settings.enabled !== false) return guild.id;
     }
   }
   catch (_) { /* ignore */ }
-  return {};
+  return null;
 }
 
 function getPluginSettings(client, guildId) {
