@@ -14,6 +14,7 @@ let serverHost = null;
 let serverRequestedPort = null;
 let authToken = null;
 let configWatcher = null;
+let serverClosing = null;
 const recentEvents = new Map();
 
 module.exports = {
@@ -33,17 +34,19 @@ module.exports = {
     startConfigWatcher(client);
   },
 
-  onEnabled: ({ client, guild }) => {
-    ensureServer(client, guild?.id);
+  onEnabled: async ({ client, guild }) => {
+    await ensureServer(client, guild?.id);
     logUrl(client, guild?.id);
   },
 
-  onUnload: () => {
-    if (server) server.close();
-    server = null;
-    serverPort = null;
-    serverHost = null;
-    serverRequestedPort = null;
+  onDisabled: async ({ client }) => {
+    const preferredGuildId = getPreferredConfigGuildId(client);
+    if (preferredGuildId) await ensureServer(client, preferredGuildId);
+    else await closeServer();
+  },
+
+  onUnload: async () => {
+    await closeServer();
     if (configWatcher) clearInterval(configWatcher);
     configWatcher = null;
     authToken = null;
@@ -70,7 +73,7 @@ module.exports = {
         const verifyId = Math.floor(100000 + Math.random() * 900000);
         client.logInteraction(interaction, verifyId, 'slashCommand');
         if (!await client.validatePermissions(interaction)) return;
-        ensureServer(client, interaction.guildId);
+        await ensureServer(client, interaction.guildId);
         const url = getPublicUrl(interaction.guildId);
         await interaction.reply({
           ephemeral: true,
@@ -81,15 +84,16 @@ module.exports = {
   ]
 };
 
-function ensureServer(client, guildId = null) {
+async function ensureServer(client, guildId = null) {
   if (!authToken) authToken = generateToken();
   startConfigWatcher(client);
 
   const desired = getDefaultServerConfig(client, guildId);
   if (server) {
     if (serverHost === desired.host && serverRequestedPort === desired.port) return;
-    closeServer();
+    await closeServer();
   }
+  if (serverClosing) await serverClosing;
 
   serverHost = desired.host;
   serverRequestedPort = desired.port;
@@ -110,33 +114,56 @@ function ensureServer(client, guildId = null) {
     client.log(client.intlGet(null, 'errorCap'), `[vendor-map] server error: ${err?.message || err}`, 'error');
   });
 
-  server.listen(desired.port, desired.host, () => {
-    serverPort = server.address().port;
-    client.log(client.intlGet(null, 'infoCap'), `[vendor-map] listening at ${getPublicUrl()} (configured ${desired.host}:${desired.port || 'random'})`);
+  await new Promise((resolve) => {
+    const activeServer = server;
+    activeServer.once('listening', () => {
+      serverPort = activeServer.address().port;
+      client.log(client.intlGet(null, 'infoCap'), `[vendor-map] listening at ${getPublicUrl()} (configured ${desired.host}:${desired.port || 'random'})`);
+      resolve();
+    });
+    activeServer.once('error', () => resolve());
+    activeServer.listen(desired.port, desired.host);
   });
 }
 
-function closeServer() {
-  try { if (server) server.close(); } catch (_) { /* ignore */ }
+async function closeServer() {
+  const activeServer = server;
   server = null;
   serverPort = null;
   serverHost = null;
   serverRequestedPort = null;
+  if (!activeServer) {
+    if (serverClosing) await serverClosing;
+    return;
+  }
+
+  serverClosing = new Promise((resolve) => {
+    try {
+      if (activeServer.listening) activeServer.close(() => resolve());
+      else resolve();
+    }
+    catch (_) { resolve(); }
+  });
+  await serverClosing;
+  serverClosing = null;
 }
 
 function startConfigWatcher(client) {
   if (configWatcher) return;
-  configWatcher = setInterval(() => {
+  configWatcher = setInterval(async () => {
     const preferredGuildId = getPreferredConfigGuildId(client);
-    if (!preferredGuildId) return;
+    if (!preferredGuildId) {
+      if (server) await closeServer();
+      return;
+    }
     if (!server) {
-      ensureServer(client, preferredGuildId);
+      await ensureServer(client, preferredGuildId);
       return;
     }
     const desired = getDefaultServerConfig(client, preferredGuildId);
     if (serverHost !== desired.host || serverRequestedPort !== desired.port) {
       client.log(client.intlGet(null, 'infoCap'), `[vendor-map] restarting to apply configured bind ${desired.host}:${desired.port || 'random'}`);
-      ensureServer(client, preferredGuildId);
+      await ensureServer(client, preferredGuildId);
     }
   }, 5000);
 }
