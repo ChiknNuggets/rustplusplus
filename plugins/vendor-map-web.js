@@ -436,22 +436,24 @@ function getItem(client, itemId) {
 }
 
 function buildCheapestByCategory(vendors) {
-  const cheapest = new Map();
+  const grouped = new Map();
   for (const vendor of vendors.vendingMachines || []) {
     for (const order of vendor.orders || []) {
       if (!order.inStock) continue;
       const quantity = Math.max(1, order.quantity || 1);
       const unitCost = (order.cost || 0) / quantity;
       const itemKey = `${order.itemId}:${order.itemBlueprint ? 'bp' : 'item'}`;
-      const key = itemKey;
+      const currencyKey = `${order.currencyId}:${order.currencyBlueprint ? 'bp' : 'item'}`;
       const candidate = {
-        key,
+        key: itemKey,
         itemKey,
+        currencyKey,
         itemId: order.itemId,
         itemName: order.itemName,
         itemShortName: order.itemShortName,
         itemCategory: order.itemCategory,
         itemBlueprint: order.itemBlueprint,
+        itemIcon: order.itemIcon,
         currencyId: order.currencyId,
         currencyName: order.currencyName,
         currencyShortName: order.currencyShortName,
@@ -468,16 +470,61 @@ function buildCheapestByCategory(vendors) {
         y: vendor.y,
         searchText: [order.itemName, order.currencyName, vendor.grid, vendor.location, order.itemShortName, order.currencyShortName].join(' ').toLowerCase()
       };
-      const current = cheapest.get(key);
+
+      if (!grouped.has(itemKey)) {
+        grouped.set(itemKey, {
+          key: itemKey,
+          itemKey,
+          itemId: candidate.itemId,
+          itemName: candidate.itemName,
+          itemShortName: candidate.itemShortName,
+          itemCategory: candidate.itemCategory,
+          itemBlueprint: candidate.itemBlueprint,
+          itemIcon: candidate.itemIcon,
+          priceOptionsByCurrency: new Map(),
+          searchParts: [candidate.itemName, candidate.itemShortName]
+        });
+      }
+
+      const group = grouped.get(itemKey);
+      group.searchParts.push(candidate.currencyName, candidate.currencyShortName, candidate.grid, candidate.location);
+      const current = group.priceOptionsByCurrency.get(currencyKey);
       if (!current || candidate.unitCost < current.unitCost ||
         (candidate.unitCost === current.unitCost && candidate.stock > current.stock)) {
-        cheapest.set(key, candidate);
+        group.priceOptionsByCurrency.set(currencyKey, candidate);
       }
     }
   }
 
   const categories = {};
-  for (const offer of cheapest.values()) {
+  for (const group of grouped.values()) {
+    const priceOptions = Array.from(group.priceOptionsByCurrency.values()).sort((a, b) =>
+      a.currencyName.localeCompare(b.currencyName) || a.unitCost - b.unitCost);
+    if (!priceOptions.length) continue;
+    const best = priceOptions.slice().sort((a, b) => a.unitCost - b.unitCost || b.stock - a.stock)[0];
+    const offer = {
+      key: group.key,
+      itemKey: group.itemKey,
+      itemId: group.itemId,
+      itemName: group.itemName,
+      itemShortName: group.itemShortName,
+      itemCategory: group.itemCategory,
+      itemBlueprint: group.itemBlueprint,
+      itemIcon: group.itemIcon,
+      priceOptions,
+      priceOptionCount: priceOptions.length,
+      quantity: best.quantity,
+      cost: best.cost,
+      unitCost: best.unitCost,
+      currencyId: best.currencyId,
+      currencyName: best.currencyName,
+      currencyShortName: best.currencyShortName,
+      currencyBlueprint: best.currencyBlueprint,
+      vendorId: best.vendorId,
+      grid: best.grid,
+      location: best.location,
+      searchText: group.searchParts.join(' ').toLowerCase()
+    };
     const category = offer.itemCategory || 'Other';
     if (!categories[category]) categories[category] = [];
     categories[category].push(offer);
@@ -486,7 +533,7 @@ function buildCheapestByCategory(vendors) {
   const sorted = {};
   for (const category of Object.keys(categories).sort((a, b) => a.localeCompare(b))) {
     sorted[category] = categories[category].sort((a, b) =>
-      a.itemName.localeCompare(b.itemName) || a.currencyName.localeCompare(b.currencyName) || a.unitCost - b.unitCost);
+      a.itemName.localeCompare(b.itemName) || a.unitCost - b.unitCost || a.currencyName.localeCompare(b.currencyName));
   }
   return sorted;
 }
@@ -800,14 +847,14 @@ function htmlPage() {
 }
 
 function appCss() {
-  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list,.profit-list,.price-check-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row,.profit-row,.price-check-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover,.profit-row:hover,.price-check-row:hover{background:#1b2230}.shop-icon{width:32px;height:32px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 32px}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.cheap-main,.profit-main,.price-check-main{min-width:0}.cheap-title,.cheap-cost,.profit-title,.profit-route,.price-check-title,.price-check-route{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title,.profit-title,.price-check-title{font-weight:700}.cheap-cost,.profit-route,.price-check-route{color:var(--muted);font-size:12px}.profit-gain,.price-check-location{color:var(--good);font-size:12px;font-weight:800}.price-check-location{color:var(--warn)}.home-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px}#homeStatus{margin-top:8px}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible}.marker.vending{background:var(--accent);border-radius:8px}.marker.home{width:36px;height:36px;background:var(--good);color:#062411;border-radius:50%;font-weight:900}.marker.cluster{width:34px;height:34px;background:linear-gradient(135deg,var(--accent),#f59e0b);border-radius:10px;font-weight:900}.cluster-popover{display:none;position:absolute;left:50%;top:38px;transform:translateX(-50%);width:340px;max-height:360px;overflow:auto;background:#111722;border:1px solid var(--line);border-radius:12px;padding:10px;text-align:left;box-shadow:0 12px 42px rgba(0,0,0,.65);z-index:20}.marker.cluster:hover .cluster-popover,.marker.cluster:focus .cluster-popover{display:block}.cluster-title{font-weight:900;margin-bottom:6px}.cluster-vendor{border-top:1px solid var(--line);padding:7px 0}.cluster-vendor:first-of-type{border-top:0}.cluster-items{display:grid;gap:4px;max-height:132px;overflow:auto}.cluster-item{display:grid;grid-template-columns:1fr auto;gap:8px;color:var(--muted);font-size:12px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:34px minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b,.item span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:10px}.toolbar{width:100%;flex-wrap:wrap}.layout{display:block;height:auto}.sidebar{height:auto}.map-panel{height:70vh}.details{top:0}.map-buttons{grid-template-columns:1fr}}`;
+  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list,.profit-list,.price-check-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row,.profit-row,.price-check-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover,.profit-row:hover,.price-check-row:hover,.cheap-option:hover{background:#1b2230}.shop-icon{width:32px;height:32px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 32px}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.cheap-main,.profit-main,.price-check-main{min-width:0}.cheap-title,.cheap-cost,.profit-title,.profit-route,.price-check-title,.price-check-route,.cheap-option-title,.cheap-option-meta{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title,.profit-title,.price-check-title{font-weight:700}.cheap-cost,.profit-route,.price-check-route{color:var(--muted);font-size:12px}.profit-gain,.price-check-location{color:var(--good);font-size:12px;font-weight:800}.cheap-options{grid-column:1/-1;margin:2px 0 0 42px;border-left:2px solid var(--line);display:grid;gap:2px}.cheap-option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:7px 9px;border-radius:8px;cursor:pointer}.cheap-option-title{font-weight:700;font-size:12px}.cheap-option-meta{color:var(--muted);font-size:12px}.price-check-location{color:var(--warn)}.home-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:8px}.home-grid .input{width:100%;min-width:0}#homeRadius{grid-column:1/-1}#homeStatus{margin-top:8px}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible}.marker.vending{background:var(--accent);border-radius:8px}.marker.home{width:30px;height:30px;background:var(--good);color:#062411;border-radius:50%;font-weight:900;font-size:14px}.marker.cluster{width:34px;height:34px;background:linear-gradient(135deg,var(--accent),#f59e0b);border-radius:10px;font-weight:900}.cluster-popover{display:none;position:absolute;left:50%;top:38px;transform:translateX(-50%);width:340px;max-height:360px;overflow:auto;background:#111722;border:1px solid var(--line);border-radius:12px;padding:10px;text-align:left;box-shadow:0 12px 42px rgba(0,0,0,.65);z-index:20}.marker.cluster:hover .cluster-popover,.marker.cluster:focus .cluster-popover{display:block}.cluster-title{font-weight:900;margin-bottom:6px}.cluster-vendor{border-top:1px solid var(--line);padding:7px 0}.cluster-vendor:first-of-type{border-top:0}.cluster-items{display:grid;gap:4px;max-height:132px;overflow:auto}.cluster-item{display:grid;grid-template-columns:1fr auto;gap:8px;color:var(--muted);font-size:12px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:34px minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b,.item span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:10px}.toolbar{width:100%;flex-wrap:wrap}.layout{display:block;height:auto}.sidebar{height:auto}.map-panel{height:70vh}.details{top:0}.map-buttons{grid-template-columns:1fr}}`;
 }
 
 function appJs() {
   return `(() => {
   const qs = new URLSearchParams(location.search);
   const token = qs.get('token') || '';
-  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null };
+  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{} };
   const els = {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
@@ -964,13 +1011,27 @@ function appJs() {
       blocks.push('<div class="category-block"><div class="category-head"><span>' + escapeHtml(category) + '</span><span class="muted">' + visible.length + '</span></div>' + visible.slice(0, 12).map(cheapOfferHtml).join('') + (visible.length > 12 ? '<div class="cheap-row muted"><div></div><div>+' + (visible.length - 12) + ' more, narrow search to reveal</div></div>' : '') + '</div>');
     });
     els.cheapestList.innerHTML = blocks.length ? blocks.join('') : '<div class="muted">No in-stock vendor prices found.</div>';
-    els.cheapestList.querySelectorAll('.cheap-row[data-vendor-id]').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.vendorId)));
+    els.cheapestList.querySelectorAll('.cheap-row[data-offer-key]').forEach(row => row.addEventListener('click', (e) => {
+      if (e.target.closest('.cheap-option')) return;
+      state.expandedCheapest[row.dataset.offerKey] = !state.expandedCheapest[row.dataset.offerKey];
+      renderCheapest();
+    }));
+    els.cheapestList.querySelectorAll('.cheap-option[data-vendor-id]').forEach(row => row.addEventListener('click', (e) => { e.stopPropagation(); selectVendor(row.dataset.vendorId); }));
   }
 
   function cheapOfferHtml(o){
     const title = (o.quantity || 0) + '× ' + o.itemName + (o.itemBlueprint ? ' BP' : '');
-    const cost = (o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : '') + ' at ' + (o.grid || o.location || 'unknown');
-    return '<div class="cheap-row" data-vendor-id="' + escapeHtml(o.vendorId) + '">' + squareIcon(o) + '<div class="cheap-main"><div class="cheap-title">' + escapeHtml(title) + '</div><div class="cheap-cost">' + escapeHtml(cost) + '</div></div></div>';
+    const first = (o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : '') + ' at ' + (o.grid || o.location || 'unknown');
+    const count = o.priceOptionCount || (o.priceOptions || []).length || 1;
+    const expanded = !!state.expandedCheapest[o.key];
+    const options = expanded ? '<div class="cheap-options">' + (o.priceOptions || []).map(priceOptionHtml).join('') + '</div>' : '';
+    return '<div class="cheap-row" data-offer-key="' + escapeHtml(o.key) + '">' + squareIcon(o) + '<div class="cheap-main"><div class="cheap-title">' + escapeHtml(title) + '</div><div class="cheap-cost">' + escapeHtml(count + ' payment option' + (count === 1 ? '' : 's') + ' · cheapest shown: ' + first) + '</div></div>' + options + '</div>';
+  }
+
+  function priceOptionHtml(o){
+    const title = escapeHtml((o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : ''));
+    const meta = escapeHtml((o.quantity || 0) + '× item · ' + (o.grid || o.location || 'unknown'));
+    return '<div class="cheap-option" data-vendor-id="' + escapeHtml(o.vendorId) + '"><div class="cheap-option-title">' + title + '</div><div class="cheap-option-meta">' + meta + '</div></div>';
   }
 
   function squareIcon(o){
