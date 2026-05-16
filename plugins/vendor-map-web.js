@@ -25,11 +25,10 @@ module.exports = {
   description: 'Token-protected local web UI with pan/zoom map, vendor search, filters, and live vendor details.',
 
   configSchema: {
-    bindHost: { type: 'text', label: 'Bind host', default: '127.0.0.1' },
-    publicIpAddress: { type: 'text', label: 'Public IP address or hostname', default: '' },
+    bindHost: { type: 'text', label: 'IP', default: '127.0.0.1' },
     port: { type: 'text', label: 'Port (0 = random)', default: '0' },
-    autoRefreshSeconds: { type: 'text', label: 'Auto-refresh seconds', default: '5' },
-    showOutOfStock: { type: 'bool', label: 'Show out-of-stock sell orders by default', default: false }
+    publicIpAddress: { type: 'text', label: 'Public IP address or hostname', default: '' },
+    autoRefreshSeconds: { type: 'text', label: 'Auto-refresh seconds', default: '5' }
   },
 
   onLoad: ({ client }) => {
