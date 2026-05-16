@@ -26,6 +26,7 @@ module.exports = {
 
   configSchema: {
     bindHost: { type: 'text', label: 'Bind host', default: '127.0.0.1' },
+    publicIpAddress: { type: 'text', label: 'Public IP address or hostname', default: '' },
     port: { type: 'text', label: 'Port (0 = random)', default: '0' },
     autoRefreshSeconds: { type: 'text', label: 'Auto-refresh seconds', default: '5' },
     showOutOfStock: { type: 'bool', label: 'Show out-of-stock sell orders by default', default: false },
@@ -76,7 +77,7 @@ module.exports = {
         client.logInteraction(interaction, verifyId, 'slashCommand');
         if (!await client.validatePermissions(interaction)) return;
         await ensureServer(client, interaction.guildId);
-        const url = getPublicUrl(interaction.guildId);
+        const url = getPublicUrl(client, interaction.guildId);
         await interaction.reply({
           ephemeral: true,
           content: url ? `Interactive vendor map: ${url}` : 'Vendor map server is starting. Try again in a few seconds.'
@@ -120,7 +121,7 @@ async function ensureServer(client, guildId = null) {
     const activeServer = server;
     activeServer.once('listening', () => {
       serverPort = activeServer.address().port;
-      client.log(client.intlGet(null, 'infoCap'), `[vendor-map] listening at ${getPublicUrl()} (configured ${desired.host}:${desired.port || 'random'})`);
+      client.log(client.intlGet(null, 'infoCap'), `[vendor-map] listening at ${getPublicUrl(client, guildId)} (configured ${desired.host}:${desired.port || 'random'})`);
       resolve();
     });
     activeServer.once('error', () => resolve());
@@ -210,15 +211,33 @@ function getPluginSettings(client, guildId) {
 }
 
 function logUrl(client, guildId) {
-  const url = getPublicUrl(guildId);
+  const url = getPublicUrl(client, guildId);
   if (!url) return;
   client.log(client.intlGet(null, 'infoCap'), `[vendor-map] URL${guildId ? ` for guild ${guildId}` : ''}: ${url}`);
 }
 
-function getPublicUrl(guildId = '') {
+function getPublicUrl(client, guildId = '') {
   if (!serverPort || !authToken) return null;
+  const origin = getPublicOrigin(client, guildId);
   const guildPart = guildId ? `&guildId=${encodeURIComponent(guildId)}` : '';
-  return `http://127.0.0.1:${serverPort}/?token=${encodeURIComponent(authToken)}${guildPart}`;
+  return `${origin}/?token=${encodeURIComponent(authToken)}${guildPart}`;
+}
+
+function getPublicOrigin(client, guildId = '') {
+  const settings = guildId ? getPluginSettings(client, guildId) : getFirstPluginSettings(client);
+  const configured = String(settings.publicIpAddress || '').trim();
+  if (!configured) return `http://127.0.0.1:${serverPort}`;
+
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(configured);
+  try {
+    const parsed = new URL(hasScheme ? configured : `http://${configured}`);
+    if (!parsed.port) parsed.port = `${serverPort}`;
+    return `${parsed.protocol}//${parsed.host}`;
+  }
+  catch (_) {
+    const host = configured.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/\/.*$/, '');
+    return `http://${host}:${serverPort}`;
+  }
 }
 
 async function handleRequest(client, req, res) {
