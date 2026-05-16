@@ -29,8 +29,7 @@ module.exports = {
     publicIpAddress: { type: 'text', label: 'Public IP address or hostname', default: '' },
     port: { type: 'text', label: 'Port (0 = random)', default: '0' },
     autoRefreshSeconds: { type: 'text', label: 'Auto-refresh seconds', default: '5' },
-    showOutOfStock: { type: 'bool', label: 'Show out-of-stock sell orders by default', default: false },
-    homeLocation: { type: 'text', label: 'Home location (x,y,radius)', default: '' }
+    showOutOfStock: { type: 'bool', label: 'Show out-of-stock sell orders by default', default: false }
   },
 
   onLoad: ({ client }) => {
