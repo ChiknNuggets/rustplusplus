@@ -7,7 +7,7 @@
         "start": "ts-node .",
         "preinstall": "npx npm-force-resolutions",
         "test": "tsc --noEmit -p .",
-        "generate:item-icons": "node scripts/generate_item_icons.js"
+        "generate:item-icons": "python scripts/generate_item_icons.py"
     },
     "repository": {
         "type": "git",
