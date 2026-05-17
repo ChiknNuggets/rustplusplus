@@ -29,11 +29,15 @@ class Items {
             Path.join(__dirname, '..', 'staticFiles', 'items.json'), 'utf8'));
 
         this._itemNames = Object.values(this.items).map(item => item.name);
+
+        const itemIconsPath = Path.join(__dirname, '..', 'staticFiles', 'item-icons-embedded.js');
+        this._itemIcons = Fs.existsSync(itemIconsPath) ? require(itemIconsPath) : {};
     }
 
     /* Getters */
     get items() { return this._items; }
     get itemNames() { return this._itemNames; }
+    get itemIcons() { return this._itemIcons; }
 
     addItem(id, content) { this.items[id] = content; }
     removeItem(id) { delete this.items[id]; }
@@ -52,6 +56,17 @@ class Items {
     getDescription(id) {
         if (!this.itemExist(id)) return undefined;
         return this.items[id].description;
+    }
+
+    getIcon(id) {
+        if (id === undefined || id === null) return undefined;
+        const key = id.toString();
+        const shortName = this.getShortName(id);
+        return this.itemIcons[key] || (shortName ? this.itemIcons[shortName] : undefined);
+    }
+
+    getImage(id) {
+        return this.getIcon(id);
     }
 
     getIdByName(name) {
