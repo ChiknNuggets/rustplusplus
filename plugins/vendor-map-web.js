@@ -1454,8 +1454,8 @@ function appJs() {
   function renderClusterDetails(cluster){
     els.details.classList.remove('closed');
     const vendorBlocks = cluster.vendors.map(v => {
-      const orders = (v.orders || []).filter(o => els.showOutOfStock.checked || o.inStock);
-      return '<section class="cluster-detail-vendor"><h3>' + escapeHtml(v.label || 'Vending machine') + ' · ' + escapeHtml(v.grid || v.location || '?') + '</h3>' + (orders.length ? orders.map(orderHtml).join('') : '<div class="muted">No visible sell orders.</div>') + '</section>';
+      const orders = v.orders || [];
+      return '<section class="cluster-detail-vendor"><h3>' + escapeHtml(v.label || 'Vending machine') + ' · ' + escapeHtml(v.grid || v.location || '?') + '</h3>' + (orders.length ? orders.map(orderHtml).join('') : '<div class="muted">No sell listings.</div>') + '</section>';
     }).join('');
     els.detailsBody.innerHTML = '<h2>🛒 ' + cluster.vendors.length + ' vending machines</h2><div class="muted">Bundled shops at this location</div><p><span class="pill">X ' + Math.round(cluster.x) + '</span><span class="pill">Y ' + Math.round(cluster.y) + '</span></p>' + vendorBlocks;
   }
@@ -1472,13 +1472,13 @@ function appJs() {
   }
 
   function clusterPopoverHtml(cluster){
-    return '<div class="cluster-popover"><div class="cluster-title">' + cluster.vendors.length + ' vending machines in this base</div>' + cluster.vendors.map(v => { const orders = (v.orders || []).filter(o => els.showOutOfStock.checked || o.inStock); return '<div class="cluster-vendor"><b>' + escapeHtml(v.grid || v.location || 'Vendor') + '</b><div class="cluster-items">' + (orders.length ? tradeHeaderHtml() + orders.map(popoverOrderHtml).join('') : '<div class="muted">No visible sell orders.</div>') + '</div></div>'; }).join('') + '</div>';
+    return '<div class="cluster-popover"><div class="cluster-title">' + cluster.vendors.length + ' vending machines in this base</div>' + cluster.vendors.map(v => { const orders = v.orders || []; return '<div class="cluster-vendor"><b>' + escapeHtml(v.grid || v.location || 'Vendor') + '</b><div class="cluster-items">' + (orders.length ? tradeHeaderHtml() + orders.map(popoverOrderHtml).join('') : '<div class="muted">No sell listings.</div>') + '</div></div>'; }).join('') + '</div>';
   }
 
 
   function vendorPopoverHtml(vendor){
-    const visibleOrders = (vendor.orders || []).filter(o => els.showOutOfStock.checked || o.inStock);
-    return '<div class="vendor-popover"><div class="cluster-title">' + escapeHtml(vendor.grid || vendor.location || 'Vending machine') + '</div><div class="cluster-items">' + (visibleOrders.length ? tradeHeaderHtml() + visibleOrders.map(popoverOrderHtml).join('') : '<div class="muted">No visible sell orders.</div>') + '</div></div>';
+    const visibleOrders = vendor.orders || [];
+    return '<div class="vendor-popover"><div class="cluster-title">' + escapeHtml(vendor.grid || vendor.location || 'Vending machine') + '</div><div class="cluster-items">' + (visibleOrders.length ? tradeHeaderHtml() + visibleOrders.map(popoverOrderHtml).join('') : '<div class="muted">No sell listings.</div>') + '</div></div>';
   }
 
   function addMarker(vendor, onclick){
@@ -1506,8 +1506,8 @@ function appJs() {
   function selectVendor(id){ if (state.selectedId !== id) state.popoverScrollTop = 0; state.selectedId = id; const all = [...(state.data?.vendors?.vendingMachines || []), ...(state.data?.vendors?.travelingVendors || [])]; const vendor = all.find(v => v.id === id); if (vendor) { centerOn(vendor.x, vendor.y); renderDetails(vendor); } render(); }
   function renderDetails(v){
     els.details.classList.remove('closed');
-    const orders = (v.orders || []).filter(o => els.showOutOfStock.checked || o.inStock);
-    els.detailsBody.innerHTML = '<h2>' + icon(v) + ' ' + escapeHtml(v.label) + '</h2><div class="muted">' + escapeHtml(v.location || 'Unknown location') + '</div><p><span class="pill">Grid ' + escapeHtml(v.grid || '?') + '</span><span class="pill">X ' + Math.round(v.x) + '</span><span class="pill">Y ' + Math.round(v.y) + '</span></p>' + (v.type === 'traveling' ? '<p class="pill warn">' + (v.halted ? 'Halted' : 'Moving') + '</p>' : '<h2>Sell orders</h2>' + (orders.length ? orders.map(orderHtml).join('') : '<div class="muted">No visible orders. Enable out-of-stock orders to see more.</div>'));
+    const orders = v.orders || [];
+    els.detailsBody.innerHTML = '<h2>' + icon(v) + ' ' + escapeHtml(v.label) + '</h2><div class="muted">' + escapeHtml(v.location || 'Unknown location') + '</div><p><span class="pill">Grid ' + escapeHtml(v.grid || '?') + '</span><span class="pill">X ' + Math.round(v.x) + '</span><span class="pill">Y ' + Math.round(v.y) + '</span></p>' + (v.type === 'traveling' ? '<p class="pill warn">' + (v.halted ? 'Halted' : 'Moving') + '</p>' : '<h2>Sell orders</h2>' + (orders.length ? orders.map(orderHtml).join('') : '<div class="muted">No sell listings.</div>'));
   }
   function orderHtml(o){ const left = escapeHtml((o.quantity || 0) + '× ' + o.itemName + (o.itemBlueprint ? ' BP' : '')); const right = escapeHtml((o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : '')); const stockText = o.inStock ? ('Stock: ' + escapeHtml(o.stock)) : 'Out of stock'; return '<div class="order ' + (o.inStock ? '' : 'out') + '"><div class="item"><span>Selling</span><b>' + squareIcon(o) + left + '</b><span>' + stockText + '</span></div><div class="arrow">for</div><div class="item"><span>Cost</span><b>' + squareIcon({ itemIcon:o.currencyIcon, itemCategory:o.itemCategory, inStock:o.inStock }) + right + '</b></div></div>'; }
   function renderEvents(events){ els.events.innerHTML = events.length ? events.slice(0,8).map(e => '<div class="event"><b>' + escapeHtml(new Date(e.time).toLocaleTimeString()) + '</b><br>' + escapeHtml(e.text) + '</div>').join('') : 'No events yet.'; }
