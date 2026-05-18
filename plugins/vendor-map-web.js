@@ -263,6 +263,7 @@ async function handleRequest(client, req, res) {
 
   if (req.method === 'GET' && url.pathname === '/') return sendHtml(res, 200, htmlPage());
   if (req.method === 'GET' && url.pathname.startsWith('/item-icons/')) return sendLocalItemIcon(url, res);
+  if (req.method === 'GET' && url.pathname.startsWith('/map-image/')) return sendMapImage(url, req, res);
   if (req.method === 'GET' && url.pathname === '/api/guilds') return sendJson(res, 200, listGuilds(client));
   if (req.method === 'GET' && url.pathname === '/api/vendor-map') return sendJson(res, 200, await getVendorMap(client, url));
   if (req.method === 'GET' && url.pathname === '/api/export') return sendJson(res, 200, await getVendorMap(client, url, true));
@@ -430,7 +431,7 @@ async function buildMapPayload(client, guildId, rustplus, exportOnly) {
   }
   catch (_) { /* ignore */ }
 
-  if (!exportOnly) payload.image = readMapImage(guildId);
+  if (!exportOnly) payload.image = getMapImageUrl(guildId);
   return payload;
 }
 
@@ -993,7 +994,8 @@ function summarizeVendors(vendors) {
   };
 }
 
-function readMapImage(guildId) {
+function getMapImageFile(guildId) {
+  if (!/^[A-Za-z0-9_-]+$/.test(String(guildId || ''))) return null;
   const candidates = [
     Path.join(__dirname, '..', 'maps', `${guildId}_map_full.png`),
     Path.join(__dirname, '..', 'maps', `${guildId}_map_clean.png`),
@@ -1001,11 +1003,45 @@ function readMapImage(guildId) {
   ];
   for (const file of candidates) {
     try {
-      if (Fs.existsSync(file)) return `data:image/png;base64,${Fs.readFileSync(file).toString('base64')}`;
+      if (Fs.existsSync(file)) {
+        const stat = Fs.statSync(file);
+        if (stat.isFile()) return { file, mtimeMs: stat.mtimeMs, size: stat.size };
+      }
     }
     catch (_) { /* ignore */ }
   }
   return null;
+}
+
+function getMapImageUrl(guildId) {
+  const image = getMapImageFile(guildId);
+  if (!image) return null;
+  const version = `${Math.round(image.mtimeMs)}-${image.size}`;
+  const tokenPart = authToken ? `&token=${encodeURIComponent(authToken)}` : '';
+  return `/map-image/${encodeURIComponent(guildId)}.png?v=${encodeURIComponent(version)}${tokenPart}`;
+}
+
+function sendMapImage(url, req, res) {
+  try {
+    const guildId = decodeURIComponent(url.pathname.replace(/^\/map-image\//, '').replace(/\.png$/i, ''));
+    if (!guildId) return sendJson(res, 404, { ok: false, error: 'map image not found' });
+    const image = getMapImageFile(guildId);
+    if (!image) return sendJson(res, 404, { ok: false, error: 'map image not found' });
+    const etag = `W/"${Math.round(image.mtimeMs)}-${image.size}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { 'Cache-Control': 'public, max-age=31536000, immutable', 'ETag': etag });
+      return res.end();
+    }
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'ETag': etag
+    });
+    return Fs.createReadStream(image.file).pipe(res);
+  }
+  catch (_) {
+    return sendJson(res, 404, { ok: false, error: 'map image not found' });
+  }
 }
 
 function stableVendorId(prefix, vendor) {
@@ -1316,10 +1352,11 @@ function appJs() {
   }
 
   function setHomeFromSelected(){
-    const vendor = [...(state.data?.vendors?.vendingMachines || []), ...(state.data?.vendors?.travelingVendors || [])].find(v => v.id === state.selectedId);
+    const selectedCluster = findClusterById(state.selectedId, getFilteredVendors());
+    const vendor = selectedCluster || [...(state.data?.vendors?.vendingMachines || []), ...(state.data?.vendors?.travelingVendors || [])].find(v => v.id === state.selectedId);
     if (!vendor) { toast('Select a vendor marker/list row first'); return; }
     els.homeX.value = Math.round(vendor.x); els.homeY.value = Math.round(vendor.y); if (!els.homeRadius.value) els.homeRadius.value = 100;
-    toast('Home coordinates copied from selected vendor');
+    toast('Home coordinates copied from selected ' + (selectedCluster ? 'shop bundle' : 'vendor'));
   }
 
   function renderPriceChecks(){
