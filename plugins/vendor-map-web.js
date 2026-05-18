@@ -1374,9 +1374,6 @@ function appJs() {
     return src ? '<span class="mini-icon"><img src="' + escapeHtml(src) + '" alt="" /></span>' : '<span class="mini-icon placeholder">•</span>';
   }
 
-  function tradeHeaderHtml(){
-    return '<div class="cluster-head"><span>Selling</span><span></span><span>Cost</span></div>';
-  }
 
   function popoverOrderHtml(o){
     return '<div class="cluster-item"><div class="trade-cell">' + miniIcon(o.itemIcon) + '<span>' + escapeHtml((o.quantity || 0) + '× ' + o.itemName + (o.itemBlueprint ? ' BP' : '')) + '</span></div><span class="trade-arrow">for</span><div class="trade-cell">' + miniIcon(o.currencyIcon) + '<span>' + escapeHtml((o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : '')) + '</span></div></div>';
@@ -1481,13 +1478,13 @@ function appJs() {
   }
 
   function clusterPopoverHtml(cluster){
-    return '<div class="cluster-popover"><div class="cluster-title">' + cluster.vendors.length + ' vending machines in this base</div>' + cluster.vendors.map(v => { const orders = getVisibleOrders(v); return '<div class="cluster-vendor"><b>' + escapeHtml(v.grid || v.location || 'Vendor') + '</b><div class="cluster-items">' + (orders.length ? tradeHeaderHtml() + orders.map(popoverOrderHtml).join('') : '<div class="muted">No visible sell listings.</div>') + '</div></div>'; }).join('') + '</div>';
+    return '<div class="cluster-popover">' + cluster.vendors.map(v => { const orders = getVisibleOrders(v); return '<div class="cluster-vendor"><div class="cluster-items">' + (orders.length ? orders.map(popoverOrderHtml).join('') : '<div class="muted">No visible sell listings.</div>') + '</div></div>'; }).join('') + '</div>';
   }
 
 
   function vendorPopoverHtml(vendor){
     const visibleOrders = getVisibleOrders(vendor);
-    return '<div class="vendor-popover"><div class="cluster-title">' + escapeHtml(vendor.grid || vendor.location || 'Vending machine') + '</div><div class="cluster-items">' + (visibleOrders.length ? tradeHeaderHtml() + visibleOrders.map(popoverOrderHtml).join('') : '<div class="muted">No visible sell listings.</div>') + '</div></div>';
+    return '<div class="vendor-popover"><div class="cluster-items">' + (visibleOrders.length ? visibleOrders.map(popoverOrderHtml).join('') : '<div class="muted">No visible sell listings.</div>') + '</div></div>';
   }
 
   function addMarker(vendor, onclick){
