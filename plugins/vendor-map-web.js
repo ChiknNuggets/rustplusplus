@@ -1270,7 +1270,10 @@ function appJs() {
     if (els.showVending.checked) out.push(...(data.vendors?.vendingMachines || []));
     if (els.showTraveling.checked) out.push(...(data.vendors?.travelingVendors || []));
     return out.filter(v => {
-      if (els.hideEmptyVending.checked && v.type === 'vending' && (v.orderCount || 0) <= 0) return false;
+      if (els.hideEmptyVending.checked && v.type === 'vending') {
+        const visibleOrderCount = els.showOutOfStock.checked ? (v.inStockCount || 0) : (v.orderCount || 0);
+        if (visibleOrderCount <= 0) return false;
+      }
       if (!q) return true;
       const vendorText = [v.label, v.location, v.grid, v.type].join(' ').toLowerCase();
       return vendorText.includes(q) || (v.orders || []).some(o => o.searchText.includes(q));
