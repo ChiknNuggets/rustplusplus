@@ -1075,7 +1075,7 @@ function htmlPage() {
           <label><input id="showVending" type="checkbox" checked /> Vending machines</label>
           <label><input id="showTraveling" type="checkbox" checked /> Traveling vendor</label>
           <label><input id="showOutOfStock" type="checkbox" /> Out of stock orders</label>
-          <label><input id="hideEmptyVending" type="checkbox" /> Hide shops with no active sell orders</label>
+          <label><input id="hideEmptyVending" type="checkbox" /> Hide shops with no sell listings</label>
           <label><input id="showPlayers" type="checkbox" checked /> Team players</label>
           <label><input id="showMonuments" type="checkbox" /> Monuments</label>
         </div>
@@ -1270,7 +1270,7 @@ function appJs() {
     if (els.showVending.checked) out.push(...(data.vendors?.vendingMachines || []));
     if (els.showTraveling.checked) out.push(...(data.vendors?.travelingVendors || []));
     return out.filter(v => {
-      if (els.hideEmptyVending.checked && v.type === 'vending' && (v.inStockCount || 0) <= 0) return false;
+      if (els.hideEmptyVending.checked && v.type === 'vending' && (v.orderCount || 0) <= 0) return false;
       if (!q) return true;
       const vendorText = [v.label, v.location, v.grid, v.type].join(' ').toLowerCase();
       return vendorText.includes(q) || (v.orders || []).some(o => o.searchText.includes(q));
@@ -1372,7 +1372,7 @@ function appJs() {
   }
 
   function tradeHeaderHtml(){
-    return '<div class="cluster-head"><span>Selling</span><span></span><span>Currency</span></div>';
+    return '<div class="cluster-head"><span>Selling</span><span></span><span>Cost</span></div>';
   }
 
   function popoverOrderHtml(o){
@@ -1509,7 +1509,7 @@ function appJs() {
     const orders = (v.orders || []).filter(o => els.showOutOfStock.checked || o.inStock);
     els.detailsBody.innerHTML = '<h2>' + icon(v) + ' ' + escapeHtml(v.label) + '</h2><div class="muted">' + escapeHtml(v.location || 'Unknown location') + '</div><p><span class="pill">Grid ' + escapeHtml(v.grid || '?') + '</span><span class="pill">X ' + Math.round(v.x) + '</span><span class="pill">Y ' + Math.round(v.y) + '</span></p>' + (v.type === 'traveling' ? '<p class="pill warn">' + (v.halted ? 'Halted' : 'Moving') + '</p>' : '<h2>Sell orders</h2>' + (orders.length ? orders.map(orderHtml).join('') : '<div class="muted">No visible orders. Enable out-of-stock orders to see more.</div>'));
   }
-  function orderHtml(o){ const left = escapeHtml((o.quantity || 0) + '× ' + o.itemName + (o.itemBlueprint ? ' BP' : '')); const right = escapeHtml((o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : '')); return '<div class="order ' + (o.inStock ? '' : 'out') + '"><div class="item"><span>Selling</span><b>' + squareIcon(o) + left + '</b><span>Stock: ' + escapeHtml(o.stock) + '</span></div><div class="arrow">for</div><div class="item"><span>Currency</span><b>' + miniIcon(o.currencyIcon) + right + '</b></div></div>'; }
+  function orderHtml(o){ const left = escapeHtml((o.quantity || 0) + '× ' + o.itemName + (o.itemBlueprint ? ' BP' : '')); const right = escapeHtml((o.cost || 0) + '× ' + o.currencyName + (o.currencyBlueprint ? ' BP' : '')); const stockText = o.inStock ? ('Stock: ' + escapeHtml(o.stock)) : 'Out of stock'; return '<div class="order ' + (o.inStock ? '' : 'out') + '"><div class="item"><span>Selling</span><b>' + squareIcon(o) + left + '</b><span>' + stockText + '</span></div><div class="arrow">for</div><div class="item"><span>Cost</span><b>' + squareIcon({ itemIcon:o.currencyIcon, itemCategory:o.itemCategory, inStock:o.inStock }) + right + '</b></div></div>'; }
   function renderEvents(events){ els.events.innerHTML = events.length ? events.slice(0,8).map(e => '<div class="event"><b>' + escapeHtml(new Date(e.time).toLocaleTimeString()) + '</b><br>' + escapeHtml(e.text) + '</div>').join('') : 'No events yet.'; }
 
   function icon(v){ return v.type === 'home' ? '⌂' : v.type === 'traveling' ? '🚚' : v.type === 'player' ? '👤' : v.type === 'monument' ? '◆' : '🛒'; }
