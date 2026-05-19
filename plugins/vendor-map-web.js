@@ -934,8 +934,8 @@ function buildProfitTrades(vendors) {
 
 function categorizeItem(shortName, name) {
   const value = `${shortName || ''} ${name || ''}`.toLowerCase();
-  if (hasAny(value, ['rifle', 'pistol', 'smg', 'shotgun', 'lmg', 'launcher', 'm249', 'revolver', 'python', 'eoka', 'crossbow', 'bow.', 'weapon.', 'flamethrower', 'nailgun'])) return 'Guns & Weapons';
   if (hasAny(value, ['ammo', 'arrow', 'rocket', 'grenade', 'shell', 'incendiary', 'hv.'])) return 'Ammo & Explosives';
+  if (hasAny(value, ['rifle', 'pistol', 'smg', 'shotgun', 'lmg', 'launcher', 'm249', 'revolver', 'python', 'eoka', 'crossbow', 'bow.', 'weapon.', 'flamethrower', 'nailgun'])) return 'Guns & Weapons';
   if (hasAny(value, ['attire.', 'clothing', 'hoodie', 'pants', 'boots', 'gloves', 'helmet', 'facemask', 'jacket', 'shirt', 'kilt', 'roadsign', 'hazmat', 'armor', 'vest', 'mask', 'sunglasses'])) return 'Clothing & Armor';
   if (hasAny(value, ['component', 'gears', 'spring', 'riflebody', 'semibody', 'smgbody', 'tarp', 'rope', 'sewing', 'sheetmetal', 'techparts', 'propanetank', 'metalblade', 'metalspring', 'roadsigns', 'fuse', 'ducttape'])) return 'Components';
   if (hasAny(value, ['building', 'wall.', 'floor.', 'door.', 'barricade', 'ladder', 'gate', 'shutter', 'lock.', 'cupboard', 'foundation', 'embrasure', 'furnace', 'box.', 'storage', 'sign.', 'planter', 'trap', 'turret'])) return 'Building & Deployables';
@@ -1135,7 +1135,7 @@ function htmlPage() {
     </div>
     <nav class="mobile-tabs" aria-label="Vendor map sections">
       <button class="mobile-tab active" data-panel="map" title="Map" aria-label="Map">🗺️</button>
-      <button class="mobile-tab" data-panel="controls" title="Filters" aria-label="Filters">🔎</button>
+      <button class="mobile-tab" data-panel="controls" title="Settings" aria-label="Settings">⚙️</button>
       <button class="mobile-tab" data-panel="prices" title="Prices" aria-label="Prices">💰</button>
       <button class="mobile-tab" data-panel="vendors" title="Vendors" aria-label="Vendors">🛒</button>
       <button class="mobile-tab" data-panel="home" title="Home" aria-label="Home">⌂</button>
@@ -1145,7 +1145,7 @@ function htmlPage() {
   <main class="layout">
     <aside class="sidebar">
       <section class="card stats" id="stats" data-mobile-panel="controls"></section>
-      <section class="card controls" data-mobile-panel="controls">
+      <section class="card controls" data-mobile-panel="controls"><h2>Quick filters</h2>
         <label>Search items, currencies, grids, vendors
           <input id="search" class="input full" placeholder="e.g. sulfur, scrap, D12" autocomplete="off" />
         </label>
@@ -1161,10 +1161,10 @@ function htmlPage() {
           <button id="fitMap" class="btn full">Fit map</button>
           <button id="refreshNow" class="btn full primary">Refresh now</button>
         </div>
-        <label class="refresh-setting">Refresh interval (seconds)
+        <details class="settings-collapse"><summary>Advanced settings</summary><label class="refresh-setting">Refresh interval (seconds)
           <input id="refreshSeconds" class="input full" type="number" min="2" max="3600" step="1" />
         </label>
-        <button id="saveRefresh" class="btn full">Save refresh interval</button>
+        <button id="saveRefresh" class="btn full">Save refresh interval</button><label style="display:block;margin-top:10px">Hide items (comma-separated names or shortnames)<input id="hiddenItems" class="input full" placeholder="example: skull,twitch,rug.bear" /></label></details>
       </section>
       <section class="card" data-mobile-panel="home">
         <h2>Home location</h2>
@@ -1194,7 +1194,8 @@ function htmlPage() {
       </section>
       <section class="card" data-mobile-panel="vendors">
         <h2>Vendors</h2>
-        <div id="vendorList" class="vendor-list"></div>
+        <button id="toggleVendorList" class="btn full">Show vendor list</button>
+        <div id="vendorList" class="vendor-list" style="display:none"></div>
       </section>
       <section class="card" data-mobile-panel="events">
         <h2>Recent events</h2>
@@ -1230,13 +1231,13 @@ function appJs() {
   const STACKED_VENDING_MACHINE_MARKER_IMAGE = ${JSON.stringify(STACKED_VENDING_MACHINE_MARKER_IMAGE)};
   const qs = new URLSearchParams(location.search);
   const token = qs.get('token') || '';
-  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{}, popoverScrollTop:0 };
+  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{}, popoverScrollTop:0, hiddenItems:new Set(), vendorListVisible:false };
   const els = {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
     showOutOfStock: document.getElementById('showOutOfStock'), hideEmptyVending: document.getElementById('hideEmptyVending'), showPlayers: document.getElementById('showPlayers'), showMonuments: document.getElementById('showMonuments'),
     vendorList: document.getElementById('vendorList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), priceCheckList: document.getElementById('priceCheckList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
-    layer: document.getElementById('markerLayer'), empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast'), homeX: document.getElementById('homeX'), homeY: document.getElementById('homeY'), homeRadius: document.getElementById('homeRadius'), homeStatus: document.getElementById('homeStatus'), refreshSeconds: document.getElementById('refreshSeconds')
+    layer: document.getElementById('markerLayer'), empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast'), homeX: document.getElementById('homeX'), homeY: document.getElementById('homeY'), homeRadius: document.getElementById('homeRadius'), homeStatus: document.getElementById('homeStatus'), refreshSeconds: document.getElementById('refreshSeconds'), hiddenItems: document.getElementById('hiddenItems'), toggleVendorList: document.getElementById('toggleVendorList')
   };
   const headers = { 'x-vendor-map-token': token };
 
@@ -1251,6 +1252,9 @@ function appJs() {
       setMobilePanel(document.body.dataset.mobilePanel || 'map');
       setupMapInteraction();
       bindControls();
+      const savedHidden = (localStorage.getItem('vendorMapHiddenItems') || '').toLowerCase();
+      els.hiddenItems.value = savedHidden;
+      state.hiddenItems = new Set(savedHidden.split(',').map(v => v.trim()).filter(Boolean));
       const guilds = await api('/api/guilds');
       els.guild.innerHTML = '';
       (guilds.guilds || []).forEach(g => { const o = document.createElement('option'); o.value = g.id; o.textContent = g.name + (g.connected ? ' • connected' : ' • offline'); els.guild.appendChild(o); });
@@ -1275,6 +1279,17 @@ function appJs() {
     document.getElementById('clearHome').addEventListener('click', clearHome);
     document.getElementById('homeFromSelected').addEventListener('click', setHomeFromSelected);
     document.getElementById('saveRefresh').addEventListener('click', saveRefreshInterval);
+    els.hiddenItems.addEventListener('change', () => {
+      const raw = (els.hiddenItems.value || '').toLowerCase();
+      localStorage.setItem('vendorMapHiddenItems', raw);
+      state.hiddenItems = new Set(raw.split(',').map(v => v.trim()).filter(Boolean));
+      render();
+    });
+    els.toggleVendorList.addEventListener('click', () => {
+      state.vendorListVisible = !state.vendorListVisible;
+      els.vendorList.style.display = state.vendorListVisible ? 'grid' : 'none';
+      els.toggleVendorList.textContent = state.vendorListVisible ? 'Hide vendor list' : 'Show vendor list';
+    });
     document.querySelectorAll('.mobile-tab[data-panel]').forEach(tab => tab.addEventListener('click', () => setMobilePanel(tab.dataset.panel)));
   }
 
@@ -1343,6 +1358,14 @@ function appJs() {
 
   function stat(value, label){ return '<div class="stat"><b>' + escapeHtml(value ?? 0) + '</b><span>' + escapeHtml(label) + '</span></div>'; }
 
+  function isHiddenOrder(order){
+    if (!order) return false;
+    if (!state.hiddenItems.size) return false;
+    const hay = [order.itemName, order.itemShortName, order.currencyName, order.currencyShortName].join(' ').toLowerCase();
+    for (const token of state.hiddenItems) { if (token && hay.includes(token)) return true; }
+    return false;
+  }
+
   function getFilteredVendors(){
     const data = state.data || {}; const q = els.search.value.trim().toLowerCase(); const out = [];
     if (els.showVending.checked) out.push(...(data.vendors?.vendingMachines || []));
@@ -1354,7 +1377,7 @@ function appJs() {
       }
       if (!q) return true;
       const vendorText = [v.label, v.location, v.grid, v.type].join(' ').toLowerCase();
-      return vendorText.includes(q) || (v.orders || []).some(o => o.searchText.includes(q));
+      return vendorText.includes(q) || (v.orders || []).some(o => !isHiddenOrder(o) && o.searchText.includes(q));
     });
   }
 
@@ -1403,7 +1426,7 @@ function appJs() {
 
   function renderPriceChecks(){
     const q = els.search.value.trim().toLowerCase();
-    const checks = (state.data?.priceChecks || []).filter(check => !q || (check.searchText || '').includes(q));
+    const checks = (state.data?.priceChecks || []).filter(check => !isHiddenOrder(check) && (!q || (check.searchText || '').includes(q)));
     if (!state.data?.config?.home) { els.priceCheckList.innerHTML = '<div class="muted">Set your home location to compare your nearby vendors against the rest of the map.</div>'; return; }
     if (!checks.length) { els.priceCheckList.innerHTML = '<div class="muted">No cheaper competing vendors found for home-area prices.</div>'; return; }
 
@@ -1439,7 +1462,7 @@ function appJs() {
     const byCategory = state.data?.cheapestByCategory || {}; const q = els.search.value.trim().toLowerCase();
     const blocks = [];
     Object.entries(byCategory).forEach(([category, offers]) => {
-      const visible = (offers || []).filter(o => !q || (o.searchText || '').includes(q));
+      const visible = (offers || []).filter(o => !isHiddenOrder(o) && (!q || (o.searchText || '').includes(q)));
       if (!visible.length) return;
       blocks.push('<div class="category-block"><div class="category-head"><span>' + escapeHtml(category) + '</span><span class="muted">' + visible.length + '</span></div>' + visible.slice(0, 12).map(cheapOfferHtml).join('') + (visible.length > 12 ? '<div class="cheap-row muted"><div></div><div>+' + (visible.length - 12) + ' more, narrow search to reveal</div></div>' : '') + '</div>');
     });
@@ -1490,7 +1513,7 @@ function appJs() {
 
   function renderProfitTrades(){
     const q = els.search.value.trim().toLowerCase();
-    const routes = (state.data?.profitTrades || []).filter(route => !q || (route.searchText || '').includes(q));
+    const routes = (state.data?.profitTrades || []).filter(route => !isHiddenOrder(route) && (!q || (route.searchText || '').includes(q)));
     if (!routes.length) { els.profitList.innerHTML = '<div class="muted">No profitable buy/sell routes found.</div>'; return; }
     els.profitList.innerHTML = routes.slice(0, 12).map(route => '<div class="profit-row" data-buy-id="' + escapeHtml(route.buyVendorId) + '" data-sell-id="' + escapeHtml(route.sellVendorId) + '"><span class="shop-icon">↔️</span><div class="profit-main"><div class="profit-title">' + escapeHtml(route.itemName) + ' → +' + escapeHtml(route.totalProfit) + ' ' + escapeHtml(route.currencyName) + '</div><div class="profit-route">' + escapeHtml(route.routeText) + '</div><div class="profit-gain">Route: ' + escapeHtml(route.buyGrid || '?') + ' → ' + escapeHtml(route.sellGrid || '?') + ' · max ' + escapeHtml(route.tradableItemCount) + ' items</div></div></div>').join('');
     els.profitList.querySelectorAll('.profit-row').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.buyId)));
