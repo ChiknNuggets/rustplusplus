@@ -17,6 +17,8 @@ let authToken = null;
 let configWatcher = null;
 let serverClosing = null;
 const steamAvatarCache = new Map();
+const STEAM_AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
+const STEAM_AVATAR_RETRY_MS = 10 * 60 * 1000;
 const recentEvents = new Map();
 const STATIC_FILE_DIRS = [
   Path.join(__dirname, '..', 'src', 'staticFiles'),
@@ -437,16 +439,23 @@ async function buildMapPayload(client, guildId, rustplus, exportOnly) {
 
 async function getSteamAvatarUrl(client, steamId) {
   if (!steamId) return null;
+  const now = Date.now();
   const cached = steamAvatarCache.get(steamId);
-  if (cached !== undefined) return cached;
+  if (cached && cached.expiresAt > now) return cached.avatarUrl;
 
   try {
     const avatarUrl = await Scrape.scrapeSteamProfilePicture(client, steamId);
-    steamAvatarCache.set(steamId, avatarUrl || null);
+    steamAvatarCache.set(steamId, {
+      avatarUrl: avatarUrl || null,
+      expiresAt: now + (avatarUrl ? STEAM_AVATAR_CACHE_MS : STEAM_AVATAR_RETRY_MS)
+    });
     return avatarUrl || null;
   }
   catch (_) {
-    steamAvatarCache.set(steamId, null);
+    steamAvatarCache.set(steamId, {
+      avatarUrl: null,
+      expiresAt: now + STEAM_AVATAR_RETRY_MS
+    });
     return null;
   }
 }
