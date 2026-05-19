@@ -270,7 +270,10 @@ async function handleRequest(client, req, res) {
   if (req.method === 'GET' && url.pathname.startsWith('/map-image/')) return sendMapImage(url, req, res);
   if (req.method === 'GET' && url.pathname === '/api/guilds') return sendJson(res, 200, listGuilds(client));
   if (req.method === 'GET' && url.pathname === '/api/vendor-map') return sendJson(res, 200, await getVendorMap(client, url));
+  if (req.method === 'GET' && url.pathname === '/api/team') return sendJson(res, 200, await getTeamData(client, url));
   if (req.method === 'GET' && url.pathname === '/api/export') return sendJson(res, 200, await getVendorMap(client, url, true));
+  if (req.method === 'POST' && url.pathname === '/api/team/promote') return postTeamPromote(client, url, req, res);
+  if (req.method === 'POST' && url.pathname === '/api/team/kick') return postTeamKick(client, url, req, res);
   if (req.method === 'POST' && url.pathname === '/api/home') return postHome(client, url, req, res);
   if (req.method === 'POST' && url.pathname === '/api/refresh-interval') return postRefreshInterval(client, url, req, res);
   if (req.method === 'POST' && url.pathname === '/api/annotations') return postAnnotations(client, url, req, res);
@@ -330,6 +333,60 @@ async function postRefreshInterval(client, url, req, res) {
   catch (err) {
     return sendJson(res, 500, { ok: false, error: err?.message || 'failed to save refresh interval' });
   }
+}
+
+async function getTeamData(client, url) {
+  const guildId = url.searchParams.get('guildId');
+  if (!guildId) return { ok: false, error: 'guildId required' };
+  const rustplus = client.rustplusInstances?.[guildId];
+  if (!rustplus?.team) return { ok: false, error: 'team data unavailable' };
+  const hosterSteamId = getHosterSteamId(client, guildId);
+  const members = await Promise.all((rustplus.team.players || []).map(async (p) => ({
+    name: p.name || 'Unknown',
+    steamId: p.steamId || null,
+    isLeader: rustplus.team.leaderSteamId === p.steamId,
+    isOnline: !!p.isOnline,
+    avatarUrl: await getSteamAvatarUrl(client, p.steamId || null),
+    battlemetrics: await fetchBattleMetricsSummary(p.steamId || null)
+  })));
+  return { ok: true, hosterSteamId, hosterIsTeamLeader: hosterSteamId === rustplus.team.leaderSteamId, leaderSteamId: rustplus.team.leaderSteamId, members };
+}
+
+async function postTeamPromote(client, url, req, res) {
+  const guildId = url.searchParams.get('guildId');
+  const steamId = String((await readJson(req))?.steamId || '');
+  const rustplus = client.rustplusInstances?.[guildId];
+  if (!guildId || !steamId || !rustplus?.team) return sendJson(res, 400, { ok: false, error: 'invalid request' });
+  const hosterSteamId = getHosterSteamId(client, guildId);
+  if (!hosterSteamId || rustplus.team.leaderSteamId !== hosterSteamId) return sendJson(res, 403, { ok: false, error: 'hoster is not team leader' });
+  const response = await rustplus.promoteToLeaderAsync(steamId);
+  return sendJson(res, 200, { ok: !response?.error, response });
+}
+
+async function postTeamKick(client, url, req, res) {
+  const guildId = url.searchParams.get('guildId');
+  const steamId = String((await readJson(req))?.steamId || '');
+  const rustplus = client.rustplusInstances?.[guildId];
+  if (!guildId || !steamId || !rustplus?.team) return sendJson(res, 400, { ok: false, error: 'invalid request' });
+  const hosterSteamId = getHosterSteamId(client, guildId);
+  if (!hosterSteamId || rustplus.team.leaderSteamId !== hosterSteamId) return sendJson(res, 403, { ok: false, error: 'hoster is not team leader' });
+  if (typeof rustplus.kickFromTeamAsync !== 'function') return sendJson(res, 400, { ok: false, error: 'kick API unavailable in current rustplus build' });
+  const response = await rustplus.kickFromTeamAsync(steamId);
+  return sendJson(res, 200, { ok: !response?.error, response });
+}
+
+function getHosterSteamId(client, guildId) { return client.getInstance(guildId)?.credentials?.hoster || null; }
+
+async function fetchBattleMetricsSummary(steamId) {
+  if (!steamId) return null;
+  try {
+    const p = await fetch(`https://api.battlemetrics.com/players?filter[search]=${encodeURIComponent(steamId)}&page[size]=1`).then(r => r.ok ? r.json() : null);
+    const id = p?.data?.[0]?.id; if (!id) return null;
+    const d = await fetch(`https://api.battlemetrics.com/players/${encodeURIComponent(id)}?include=server`).then(r => r.ok ? r.json() : null);
+    let seconds = 0;
+    for (const s of d?.data?.relationships?.servers?.data || []) seconds += Number(s?.meta?.timePlayed || 0);
+    return { playerId: id, playtimeHours: Math.round((seconds / 3600) * 10) / 10 };
+  } catch (_) { return null; }
 }
 
 
@@ -1172,6 +1229,7 @@ function htmlPage() {
       <button class="mobile-tab" data-panel="controls" title="Settings" aria-label="Settings">⚙️</button>
       <button class="mobile-tab" data-panel="prices" title="Prices" aria-label="Prices">💰</button>
       <button class="mobile-tab" data-panel="vendors" title="Vendors" aria-label="Vendors">🛒</button>
+      <button class="mobile-tab" data-panel="team" title="Team" aria-label="Team">👥</button>
       <button class="mobile-tab" data-panel="home" title="Home" aria-label="Home">⌂</button>
       <button class="mobile-tab" data-panel="events" title="Events" aria-label="Events">⚡</button>
     </nav>
@@ -1231,6 +1289,10 @@ function htmlPage() {
         <button id="toggleVendorList" class="btn full">Show vendor list</button>
         <div id="vendorList" class="vendor-list" style="display:none"></div>
       </section>
+      <section class="card" data-mobile-panel="team">
+        <h2>Team management</h2>
+        <div id="teamList" class="vendor-list"></div>
+      </section>
       <section class="card" data-mobile-panel="events">
         <h2>Recent events</h2>
         <div id="eventList" class="events muted">No events yet.</div>
@@ -1270,7 +1332,7 @@ function appJs() {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
     showOutOfStock: document.getElementById('showOutOfStock'), hideEmptyVending: document.getElementById('hideEmptyVending'), showPlayers: document.getElementById('showPlayers'), showMonuments: document.getElementById('showMonuments'),
-    vendorList: document.getElementById('vendorList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), priceCheckList: document.getElementById('priceCheckList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
+    vendorList: document.getElementById('vendorList'), teamList: document.getElementById('teamList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), priceCheckList: document.getElementById('priceCheckList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
     layer: document.getElementById('markerLayer'), drawCanvas: null, empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast'), homeX: document.getElementById('homeX'), homeY: document.getElementById('homeY'), homeRadius: document.getElementById('homeRadius'), homeStatus: document.getElementById('homeStatus'), refreshSeconds: document.getElementById('refreshSeconds'), hiddenItems: document.getElementById('hiddenItems'), toggleVendorList: document.getElementById('toggleVendorList'), lineColor: document.getElementById('lineColor')
   };
   const headers = { 'x-vendor-map-token': token };
@@ -1400,6 +1462,7 @@ function appJs() {
     renderPriceChecks();
     renderProfitTrades();
     renderVendorList(filtered);
+    renderTeamManagement();
     renderMarkers(filtered);
     renderAnnotations();
     renderEvents(data.events || []);
@@ -1582,6 +1645,28 @@ function appJs() {
       return '<div class="vendor-row ' + (v.id === state.selectedId ? 'active' : '') + '" data-id="' + escapeHtml(v.id) + '"><div class="vendor-title"><span>' + icon(v) + ' ' + escapeHtml(v.label) + '</span><span>' + escapeHtml(v.grid || '') + '</span></div><div class="vendor-meta">' + escapeHtml(v.location || 'Unknown location') + '</div><span class="pill ' + (v.type === 'traveling' ? 'warn' : ((v.inStockCount || 0) > 0 ? 'good' : 'danger')) + '">' + escapeHtml(stock) + '</span></div>';
     }).join('');
     els.vendorList.querySelectorAll('.vendor-row').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.id)));
+  }
+
+  async function renderTeamManagement(){
+    if (!els.teamList || !els.guild.value) return;
+    try {
+      const team = await api('/api/team?guildId=' + encodeURIComponent(els.guild.value));
+      if (!team.ok) { els.teamList.innerHTML = '<div class="muted">Team info unavailable.</div>'; return; }
+      els.teamList.innerHTML = (team.members || []).map(m => {
+        const avatar = m.avatarUrl ? '<img src="' + escapeHtml(m.avatarUrl) + '" />' : '👤';
+        const playtime = m.battlemetrics?.playtimeHours != null ? (' • BM: ' + m.battlemetrics.playtimeHours + 'h') : '';
+        const promoteBtn = team.hosterIsTeamLeader && !m.isLeader ? '<button class="btn full js-promote" data-steamid="' + escapeHtml(m.steamId) + '">Promote</button>' : '';
+        const kickBtn = team.hosterIsTeamLeader && !m.isLeader ? '<button class="btn full js-kick" data-steamid="' + escapeHtml(m.steamId) + '">Kick</button>' : '';
+        return '<div class="vendor-row"><div class="vendor-title"><span class="shop-icon">' + avatar + '</span><span>' + escapeHtml(m.name) + (m.isLeader ? ' 👑' : '') + '</span></div><div class="vendor-meta">' + escapeHtml(m.steamId || '-') + (m.isOnline ? ' • online' : ' • offline') + playtime + '</div><div class="map-buttons" style="margin-top:8px">' + promoteBtn + kickBtn + '</div></div>';
+      }).join('') || '<div class="muted">No team members available.</div>';
+      els.teamList.querySelectorAll('.js-promote').forEach(b => b.addEventListener('click', async () => { await postJson('/api/team/promote?guildId=' + encodeURIComponent(els.guild.value), { steamId: b.dataset.steamid }); toast('Promote request sent'); renderTeamManagement(); }));
+      els.teamList.querySelectorAll('.js-kick').forEach(b => b.addEventListener('click', async () => {
+        try { await postJson('/api/team/kick?guildId=' + encodeURIComponent(els.guild.value), { steamId: b.dataset.steamid }); toast('Kick request sent'); renderTeamManagement(); }
+        catch (e) { toast('Kick failed: ' + e.message); }
+      }));
+    } catch (e) {
+      els.teamList.innerHTML = '<div class="muted">Failed to load team: ' + escapeHtml(e.message) + '</div>';
+    }
   }
 
 
