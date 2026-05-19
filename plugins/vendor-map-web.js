@@ -1265,7 +1265,7 @@ function appJs() {
   const STACKED_VENDING_MACHINE_MARKER_IMAGE = ${JSON.stringify(STACKED_VENDING_MACHINE_MARKER_IMAGE)};
   const qs = new URLSearchParams(location.search);
   const token = qs.get('token') || '';
-  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{}, popoverScrollTop:0, hiddenItems:new Set(), vendorListVisible:false, annotations:{markers:[],strokes:[]}, drawMode:false, eraserMode:false, currentStroke:null, drawing:false };
+  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{}, popoverScrollTop:0, hiddenItems:new Set(), vendorListVisible:false, annotations:{markers:[],strokes:[]}, drawMode:false, eraserMode:false, currentStroke:null, drawing:false, annotationsDirty:false };
   const els = {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
@@ -1334,7 +1334,7 @@ function appJs() {
     const pointFromEvent = (e) => { const r = els.map.getBoundingClientRect(); return { x:(e.clientX - r.left - state.x)/state.scale, y:(e.clientY - r.top - state.y)/state.scale }; };
     els.map.addEventListener('pointerdown', (e)=>{ if(!state.drawMode) return; e.preventDefault(); e.stopPropagation(); state.drawing=true; const pt=pointFromEvent(e); state.currentStroke=[pt]; });
     els.map.addEventListener('pointermove', (e)=>{ if(!state.drawMode||!state.drawing) return; e.preventDefault(); e.stopPropagation(); state.currentStroke.push(pointFromEvent(e)); renderAnnotations(); });
-    els.map.addEventListener('pointerup', async (e)=>{ if(!state.drawMode||!state.drawing) return; e.preventDefault(); e.stopPropagation(); state.drawing=false; if(state.currentStroke&&state.currentStroke.length>1){ state.annotations.strokes.push({ mode: state.eraserMode ? 'erase' : 'draw', points: state.currentStroke }); await saveAnnotations(); } state.currentStroke=null; renderAnnotations(); });
+    els.map.addEventListener('pointerup', async (e)=>{ if(!state.drawMode||!state.drawing) return; e.preventDefault(); e.stopPropagation(); state.drawing=false; if(state.currentStroke&&state.currentStroke.length>1){ state.annotations.strokes.push({ mode: state.eraserMode ? 'erase' : 'draw', points: state.currentStroke }); state.annotationsDirty = true; await saveAnnotations(); } state.currentStroke=null; renderAnnotations(); });
     els.map.addEventListener('pointercancel', ()=>{ state.drawing=false; state.currentStroke=null; });
   }
 
@@ -1350,6 +1350,7 @@ function appJs() {
     const data = await api('/api/vendor-map?guildId=' + encodeURIComponent(els.guild.value));
     state.data = data;
     state.annotations = data.config?.annotations || { markers: [], strokes: [] };
+    state.annotationsDirty = false;
     els.showOutOfStock.checked = false;
     els.refreshSeconds.value = Math.max(2, data.config?.autoRefreshSeconds || 5);
     syncHomeInputs(data.config?.home || null);
@@ -1366,7 +1367,10 @@ function appJs() {
       const data = await api('/api/vendor-map?guildId=' + encodeURIComponent(els.guild.value));
       const oldImage = state.data?.map?.image;
       state.data = data;
+      const canSyncAnnotations = !state.drawMode && !state.drawing && !state.currentStroke && !state.annotationsDirty;
+      if (canSyncAnnotations) state.annotations = data.config?.annotations || { markers: [], strokes: [] };
     state.annotations = data.config?.annotations || { markers: [], strokes: [] };
+    state.annotationsDirty = false;
       if (document.activeElement !== els.refreshSeconds) els.refreshSeconds.value = Math.max(2, data.config?.autoRefreshSeconds || 5);
       syncHomeInputs(data.config?.home || null, false);
       if (data.map?.image && data.map.image !== oldImage) renderMapImage(data.map);
@@ -1581,6 +1585,7 @@ function appJs() {
     const mapX = (-state.x + (els.map.clientWidth/2)) / state.scale;
     const mapY = (-state.y + (els.map.clientHeight/2)) / state.scale;
     state.annotations.markers.push({ x: Math.round(mapX), y: Math.round(mapY), label: 'Custom' });
+    state.annotationsDirty = true;
     saveAnnotations();
     render();
   }
@@ -1598,12 +1603,13 @@ function appJs() {
 
   async function clearDrawings(){
     state.annotations = { markers: [], strokes: [] };
+    state.annotationsDirty = true;
     await saveAnnotations();
     render();
   }
 
   async function saveAnnotations(){
-    try { await postJson('/api/annotations?guildId=' + encodeURIComponent(els.guild.value), state.annotations); } catch(_){}
+    try { await postJson('/api/annotations?guildId=' + encodeURIComponent(els.guild.value), state.annotations); state.annotationsDirty = false; } catch(_){ state.annotationsDirty = true; }
   }
 
   function renderAnnotations(){
