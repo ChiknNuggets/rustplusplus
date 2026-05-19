@@ -421,16 +421,21 @@ async function buildMapPayload(client, guildId, rustplus, exportOnly) {
     if (Array.isArray(rustplus?.team?.players)) {
       payload.players = (await Promise.all(rustplus.team.players.map(async (p) => {
         const steamId = p.steamId ? p.steamId.toString() : null;
+        const online = !!p.isOnline;
+        const alive = !!p.isAlive;
         return {
           name: p.name,
           steamId,
           avatarUrl: await getSteamAvatarUrl(client, steamId),
           x: p.x,
           y: p.y,
-          online: !!p.isOnline,
-          alive: !!p.isAlive
+          online,
+          alive
         };
-      }))).filter((p) => typeof p.x === 'number' && typeof p.y === 'number');
+      }))).filter((p) => {
+        if (!p.online && !p.alive) return false;
+        return typeof p.x === 'number' && typeof p.y === 'number';
+      });
     }
   }
   catch (_) { /* ignore */ }
