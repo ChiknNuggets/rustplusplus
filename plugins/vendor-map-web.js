@@ -1365,14 +1365,16 @@ function appJs() {
   }
 
   async function refreshQuietly(){
+    if (state.drawMode || state.drawing) return;
     try {
       const data = await api('/api/vendor-map?guildId=' + encodeURIComponent(els.guild.value));
       const oldImage = state.data?.map?.image;
       state.data = data;
       const canSyncAnnotations = !state.drawMode && !state.drawing && !state.currentStroke && !state.annotationsDirty;
-      if (canSyncAnnotations) state.annotations = data.config?.annotations || { markers: [], strokes: [] };
-    state.annotations = data.config?.annotations || { markers: [], strokes: [] };
-    state.annotationsDirty = false;
+      if (canSyncAnnotations) {
+        state.annotations = data.config?.annotations || { markers: [], strokes: [] };
+        state.annotationsDirty = false;
+      }
       if (document.activeElement !== els.refreshSeconds) els.refreshSeconds.value = Math.max(2, data.config?.autoRefreshSeconds || 5);
       syncHomeInputs(data.config?.home || null, false);
       if (data.map?.image && data.map.image !== oldImage) renderMapImage(data.map);
@@ -1600,7 +1602,7 @@ function appJs() {
     if (els.drawCanvas) els.drawCanvas.style.pointerEvents = state.drawMode ? 'auto' : 'none';
   }
 
-  async function toggleDrawMode(){ state.drawMode = !state.drawMode; if (!state.drawMode) { state.eraserMode = false; if (state.annotationsDirty) await saveAnnotations(); } syncDrawButtons(); }
+  async function toggleDrawMode(){ state.drawMode = !state.drawMode; if (!state.drawMode) { state.eraserMode = false; if (state.annotationsDirty) await saveAnnotations(); await refreshQuietly(); } syncDrawButtons(); }
   function toggleEraserMode(){ if (!state.drawMode) state.drawMode = true; state.eraserMode = !state.eraserMode; syncDrawButtons(); }
 
   async function clearDrawings(){
