@@ -2,6 +2,7 @@
 // Runs a local, token-protected web UI for browsing vending machines and traveling vendors.
 
 const http = require('http');
+const https = require('https');
 const { URL } = require('url');
 const Path = require('path');
 const Fs = require('fs');
@@ -17,6 +18,9 @@ let authToken = null;
 let configWatcher = null;
 let serverClosing = null;
 const steamAvatarCache = new Map();
+const STEAM_AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
+const STEAM_AVATAR_RETRY_MS = 10 * 60 * 1000;
+const UNAVATAR_STEAM_URL = 'https://unavatar.io/steam/';
 const recentEvents = new Map();
 const STATIC_FILE_DIRS = [
   Path.join(__dirname, '..', 'src', 'staticFiles'),
@@ -269,6 +273,7 @@ async function handleRequest(client, req, res) {
   if (req.method === 'GET' && url.pathname === '/api/export') return sendJson(res, 200, await getVendorMap(client, url, true));
   if (req.method === 'POST' && url.pathname === '/api/home') return postHome(client, url, req, res);
   if (req.method === 'POST' && url.pathname === '/api/refresh-interval') return postRefreshInterval(client, url, req, res);
+  if (req.method === 'POST' && url.pathname === '/api/annotations') return postAnnotations(client, url, req, res);
 
   return sendJson(res, 404, { ok: false, error: 'not found' });
 }
@@ -327,6 +332,37 @@ async function postRefreshInterval(client, url, req, res) {
   }
 }
 
+
+function parseAnnotations(value) {
+  if (!value || typeof value !== 'string') return { markers: [], strokes: [] };
+  try {
+    const parsed = JSON.parse(value);
+    return { markers: Array.isArray(parsed?.markers) ? parsed.markers.slice(0, 200) : [], strokes: Array.isArray(parsed?.strokes) ? parsed.strokes.slice(0, 200) : [] };
+  }
+  catch (_) { return { markers: [], strokes: [] }; }
+}
+
+async function postAnnotations(client, url, req, res) {
+  const guildId = url.searchParams.get('guildId');
+  if (!guildId) return sendJson(res, 400, { ok: false, error: 'guildId required' });
+  const body = await readJson(req);
+  try {
+    const instance = client.getInstance(guildId);
+    if (!instance) return sendJson(res, 404, { ok: false, error: 'guild not found' });
+    if (!instance.pluginSettings) instance.pluginSettings = {};
+    if (!instance.pluginSettings[PLUGIN_NAME]) instance.pluginSettings[PLUGIN_NAME] = {};
+    const annotations = {
+      markers: Array.isArray(body?.markers) ? body.markers.slice(0, 200) : [],
+      strokes: Array.isArray(body?.strokes) ? body.strokes.slice(0, 200) : []
+    };
+    instance.pluginSettings[PLUGIN_NAME].mapAnnotations = JSON.stringify(annotations);
+    client.setInstance(guildId, instance);
+    return sendJson(res, 200, { ok: true, annotations });
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err?.message || 'failed to save annotations' });
+  }
+}
+
 function readJson(req) {
   return new Promise((resolve) => {
     let data = '';
@@ -353,7 +389,8 @@ function listGuilds(client) {
         connected: !!(rp && rp.isConnected),
         autoRefreshSeconds: parsePositiveInt(settings.autoRefreshSeconds, 5),
         showOutOfStock: settings.showOutOfStock === true,
-        home: parseHomeLocation(settings.homeLocation)
+        home: parseHomeLocation(settings.homeLocation),
+        annotations: parseAnnotations(settings.mapAnnotations)
       });
     }
   }
@@ -378,7 +415,8 @@ async function getVendorMap(client, url, exportOnly = false) {
     config: {
       autoRefreshSeconds: parsePositiveInt(settings.autoRefreshSeconds, 5),
       showOutOfStock: settings.showOutOfStock === true,
-      home
+      home,
+      annotations: parseAnnotations(settings.mapAnnotations)
     },
     generatedAt: new Date().toISOString(),
     map,
@@ -417,16 +455,21 @@ async function buildMapPayload(client, guildId, rustplus, exportOnly) {
     if (Array.isArray(rustplus?.team?.players)) {
       payload.players = (await Promise.all(rustplus.team.players.map(async (p) => {
         const steamId = p.steamId ? p.steamId.toString() : null;
+        const online = !!p.isOnline;
+        const alive = !!p.isAlive;
         return {
           name: p.name,
           steamId,
           avatarUrl: await getSteamAvatarUrl(client, steamId),
           x: p.x,
           y: p.y,
-          online: !!p.isOnline,
-          alive: !!p.isAlive
+          online,
+          alive
         };
-      }))).filter((p) => typeof p.x === 'number' && typeof p.y === 'number');
+      }))).filter((p) => {
+        if (!p.online && !p.alive) return false;
+        return typeof p.x === 'number' && typeof p.y === 'number';
+      });
     }
   }
   catch (_) { /* ignore */ }
@@ -435,19 +478,53 @@ async function buildMapPayload(client, guildId, rustplus, exportOnly) {
   return payload;
 }
 
+
+function fetchSteamAvatarFromXml(steamId) {
+  return new Promise((resolve) => {
+    const url = `https://steamcommunity.com/profiles/${encodeURIComponent(steamId)}?xml=1`;
+    const req = https.get(url, { headers: { 'user-agent': 'rustplusplus-vendor-map' } }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        resolve(null);
+        return;
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        const match = body.match(/<avatarFull><!\[CDATA\[(.*?)\]\]><\/avatarFull>/i);
+        resolve(match?.[1] || null);
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(5000, () => { req.destroy(); resolve(null); });
+  });
+}
+
 async function getSteamAvatarUrl(client, steamId) {
   if (!steamId) return null;
+  const now = Date.now();
   const cached = steamAvatarCache.get(steamId);
-  if (cached !== undefined) return cached;
+  if (cached && cached.expiresAt > now) return cached.avatarUrl;
 
   try {
-    const avatarUrl = await Scrape.scrapeSteamProfilePicture(client, steamId);
-    steamAvatarCache.set(steamId, avatarUrl || null);
-    return avatarUrl || null;
+    const scrapedAvatarUrl = await Scrape.scrapeSteamProfilePicture(client, steamId);
+    const xmlAvatarUrl = scrapedAvatarUrl ? null : await fetchSteamAvatarFromXml(steamId);
+    const avatarUrl = scrapedAvatarUrl || xmlAvatarUrl || `${UNAVATAR_STEAM_URL}${encodeURIComponent(steamId)}`;
+    steamAvatarCache.set(steamId, {
+      avatarUrl,
+      expiresAt: now + STEAM_AVATAR_CACHE_MS
+    });
+    return avatarUrl;
   }
   catch (_) {
-    steamAvatarCache.set(steamId, null);
-    return null;
+    const xmlAvatarUrl = await fetchSteamAvatarFromXml(steamId);
+    const fallbackAvatarUrl = xmlAvatarUrl || `${UNAVATAR_STEAM_URL}${encodeURIComponent(steamId)}`;
+    steamAvatarCache.set(steamId, {
+      avatarUrl: fallbackAvatarUrl,
+      expiresAt: now + STEAM_AVATAR_RETRY_MS
+    });
+    return fallbackAvatarUrl;
   }
 }
 
@@ -891,8 +968,8 @@ function buildProfitTrades(vendors) {
 
 function categorizeItem(shortName, name) {
   const value = `${shortName || ''} ${name || ''}`.toLowerCase();
-  if (hasAny(value, ['rifle', 'pistol', 'smg', 'shotgun', 'lmg', 'launcher', 'm249', 'revolver', 'python', 'eoka', 'crossbow', 'bow.', 'weapon.', 'flamethrower', 'nailgun'])) return 'Guns & Weapons';
   if (hasAny(value, ['ammo', 'arrow', 'rocket', 'grenade', 'shell', 'incendiary', 'hv.'])) return 'Ammo & Explosives';
+  if (hasAny(value, ['rifle', 'pistol', 'smg', 'shotgun', 'lmg', 'launcher', 'm249', 'revolver', 'python', 'eoka', 'crossbow', 'bow.', 'weapon.', 'flamethrower', 'nailgun'])) return 'Guns & Weapons';
   if (hasAny(value, ['attire.', 'clothing', 'hoodie', 'pants', 'boots', 'gloves', 'helmet', 'facemask', 'jacket', 'shirt', 'kilt', 'roadsign', 'hazmat', 'armor', 'vest', 'mask', 'sunglasses'])) return 'Clothing & Armor';
   if (hasAny(value, ['component', 'gears', 'spring', 'riflebody', 'semibody', 'smgbody', 'tarp', 'rope', 'sewing', 'sheetmetal', 'techparts', 'propanetank', 'metalblade', 'metalspring', 'roadsigns', 'fuse', 'ducttape'])) return 'Components';
   if (hasAny(value, ['building', 'wall.', 'floor.', 'door.', 'barricade', 'ladder', 'gate', 'shutter', 'lock.', 'cupboard', 'foundation', 'embrasure', 'furnace', 'box.', 'storage', 'sign.', 'planter', 'trap', 'turret'])) return 'Building & Deployables';
@@ -925,7 +1002,6 @@ function buildPriceChecks(vendors, home) {
   const checks = [];
   for (const homeVendor of homeVendors) {
     for (const homeOrder of homeVendor.orders || []) {
-      if (!homeOrder.inStock) continue;
       const homeUnitCost = (homeOrder.cost || 0) / Math.max(1, homeOrder.quantity || 1);
       for (const competitor of machines) {
         if (homeVendors.some((vendor) => vendor.id === competitor.id)) continue;
@@ -1093,7 +1169,7 @@ function htmlPage() {
     </div>
     <nav class="mobile-tabs" aria-label="Vendor map sections">
       <button class="mobile-tab active" data-panel="map" title="Map" aria-label="Map">🗺️</button>
-      <button class="mobile-tab" data-panel="controls" title="Filters" aria-label="Filters">🔎</button>
+      <button class="mobile-tab" data-panel="controls" title="Settings" aria-label="Settings">⚙️</button>
       <button class="mobile-tab" data-panel="prices" title="Prices" aria-label="Prices">💰</button>
       <button class="mobile-tab" data-panel="vendors" title="Vendors" aria-label="Vendors">🛒</button>
       <button class="mobile-tab" data-panel="home" title="Home" aria-label="Home">⌂</button>
@@ -1103,7 +1179,7 @@ function htmlPage() {
   <main class="layout">
     <aside class="sidebar">
       <section class="card stats" id="stats" data-mobile-panel="controls"></section>
-      <section class="card controls" data-mobile-panel="controls">
+      <section class="card controls" data-mobile-panel="controls"><h2>Quick filters</h2>
         <label>Search items, currencies, grids, vendors
           <input id="search" class="input full" placeholder="e.g. sulfur, scrap, D12" autocomplete="off" />
         </label>
@@ -1119,10 +1195,10 @@ function htmlPage() {
           <button id="fitMap" class="btn full">Fit map</button>
           <button id="refreshNow" class="btn full primary">Refresh now</button>
         </div>
-        <label class="refresh-setting">Refresh interval (seconds)
+        <details class="settings-collapse"><summary>Advanced settings</summary><label class="refresh-setting">Refresh interval (seconds)
           <input id="refreshSeconds" class="input full" type="number" min="2" max="3600" step="1" />
         </label>
-        <button id="saveRefresh" class="btn full">Save refresh interval</button>
+        <button id="saveRefresh" class="btn full">Save refresh interval</button><label style="display:block;margin-top:10px">Hide items (comma-separated names or shortnames)<input id="hiddenItems" class="input full" placeholder="example: skull,twitch,rug.bear" /></label></details>
       </section>
       <section class="card" data-mobile-panel="home">
         <h2>Home location</h2>
@@ -1135,7 +1211,7 @@ function htmlPage() {
           <button id="homeFromSelected" class="btn full">Use selected vendor</button>
           <button id="saveHome" class="btn full primary">Save home</button>
         </div>
-        <button id="clearHome" class="btn full">Clear home</button>
+        <button id="clearHome" class="btn full">Clear home</button><div class="map-buttons" style="margin-top:8px"><button id="addMarkerAtCenter" class="btn full">Add marker at center</button><button id="toggleDraw" class="btn full">Start drawing</button></div><button id="clearDrawings" class="btn full" style="margin-top:8px">Clear drawings/markers</button>
         <div id="homeStatus" class="muted">No home set.</div>
       </section>
       <section class="card" data-mobile-panel="prices">
@@ -1152,7 +1228,8 @@ function htmlPage() {
       </section>
       <section class="card" data-mobile-panel="vendors">
         <h2>Vendors</h2>
-        <div id="vendorList" class="vendor-list"></div>
+        <button id="toggleVendorList" class="btn full">Show vendor list</button>
+        <div id="vendorList" class="vendor-list" style="display:none"></div>
       </section>
       <section class="card" data-mobile-panel="events">
         <h2>Recent events</h2>
@@ -1160,7 +1237,7 @@ function htmlPage() {
       </section>
     </aside>
     <section class="map-panel" data-mobile-panel="map">
-      <div class="map-help">Mouse wheel / pinch to zoom · Drag to pan · Click a marker for details</div>
+      <div class="map-help">Mouse wheel / pinch to zoom · Drag to pan · Click a marker for details</div><div class="draw-overlay"><input id="lineColor" type="color" value="#fbbf24" title="Line color" /><button id="toggleDrawOverlay" class="btn">✏️</button><button id="toggleEraserOverlay" class="btn">🩹</button></div>
       <div id="map" class="map">
         <img id="mapImage" alt="Rust map" />
         <div id="markerLayer" class="marker-layer"></div>
@@ -1179,7 +1256,7 @@ function htmlPage() {
 }
 
 function appCss() {
-  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.mobile-tabs{display:none}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab;touch-action:none;overscroll-behavior:contain}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list,.profit-list,.price-check-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row,.profit-row,.price-check-row{display:grid;grid-template-columns:38px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover,.profit-row:hover,.price-check-row:hover,.cheap-option:hover{background:#1b2230}.shop-icon{position:relative;width:36px;height:36px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 36px}.shop-icon.stock-in{border-color:rgba(74,222,128,.85);box-shadow:0 0 0 1px rgba(74,222,128,.18)}.shop-icon.stock-out{border-color:rgba(239,68,68,.85);box-shadow:0 0 0 1px rgba(239,68,68,.18)}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.stock-badge{position:absolute;right:-2px;bottom:-2px;min-width:15px;height:15px;padding:0 4px;border-radius:999px;background:#111827;border:1px solid rgba(255,255,255,.75);color:#fff;font-size:10px;line-height:13px;font-weight:900;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.55);pointer-events:none}.shop-icon.stock-out .stock-badge{background:#7f1d1d}.cheap-main,.profit-main,.price-check-main{min-width:0}.cheap-title,.cheap-cost,.profit-title,.profit-route,.price-check-title,.price-check-route,.cheap-option-title,.cheap-option-meta{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title,.profit-title,.price-check-title{font-weight:700}.cheap-cost,.profit-route,.price-check-route{color:var(--muted);font-size:12px}.profit-gain,.price-check-location{color:var(--good);font-size:12px;font-weight:800}.cheap-options{grid-column:1/-1;margin:2px 0 0 46px;border-left:2px solid var(--line);display:grid;gap:2px}.cheap-option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:7px 9px;border-radius:8px;cursor:pointer}.cheap-option-title{font-weight:700;font-size:12px}.cheap-option-meta{color:var(--muted);font-size:12px}.price-check-location{color:var(--warn)}.home-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:8px}.home-grid .input{width:100%;min-width:0}#homeRadius{grid-column:1/-1}#homeStatus{margin-top:8px}.refresh-setting{display:block;margin-top:10px}.refresh-setting .input{margin-top:5px}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.pill.danger{color:#2a0606;background:#ef4444}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible;padding:0;background-position:center;background-repeat:no-repeat;background-size:cover}.marker:hover,.marker:focus,.marker:focus-within{z-index:1000}.marker.vending{width:38px;height:38px;background:transparent;border:0;border-radius:0;box-shadow:none}.marker.vending.stock-in .marker-image,.marker.cluster.stock-in .marker-image{filter:drop-shadow(0 0 7px rgba(74,222,128,.95)) drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker.vending.stock-out .marker-image,.marker.cluster.stock-out .marker-image{filter:drop-shadow(0 0 7px rgba(248,113,113,.95)) drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker.vending.stock-in::after,.marker.vending.stock-out::after,.marker.cluster.stock-in::after,.marker.cluster.stock-out::after{content:'';position:absolute;right:1px;bottom:1px;width:11px;height:11px;border-radius:50%;border:2px solid #0c0f14;background:var(--good);z-index:3}.marker.vending.stock-out::after,.marker.cluster.stock-out::after{background:#ef4444}.marker.vending .marker-label{top:35px}.marker.home{width:30px;height:30px;background:var(--good);color:#062411;border-radius:50%;font-weight:900;font-size:14px}.marker.cluster{width:40px;height:40px;background:transparent;border:0;border-radius:0;box-shadow:none;font-weight:900}.marker-image{width:100%;height:100%;display:block;object-fit:contain;filter:drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker-image.avatar-image{aspect-ratio:1/1;object-fit:cover;border-radius:50%;filter:none}.cluster-count{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;font-weight:1000;line-height:1;text-shadow:0 2px 0 #000,0 -2px 0 #000,2px 0 0 #000,-2px 0 0 #000,0 3px 8px #000}.cluster-popover,.vendor-popover{display:none;position:absolute;left:50%;top:calc(100% - 2px);transform:translateX(-50%) scale(var(--inverse-scale,1));transform-origin:top center;width:380px;max-height:360px;overflow-y:auto;overscroll-behavior:contain;background:#111722;border:1px solid var(--line);border-radius:12px;padding:10px;text-align:left;box-shadow:0 12px 42px rgba(0,0,0,.65);z-index:1001}.marker.cluster:hover .cluster-popover,.marker.cluster:focus .cluster-popover,.marker.cluster:focus-within .cluster-popover,.marker.cluster.selected .cluster-popover,.marker.vending:hover .vendor-popover,.marker.vending:focus .vendor-popover,.marker.vending:focus-within .vendor-popover,.marker.vending.selected .vendor-popover{display:block}.cluster-title{font-weight:900;margin-bottom:6px}.cluster-vendor{border-top:1px solid var(--line);padding:7px 0}.cluster-vendor:first-of-type{border-top:0}.cluster-items{display:grid;gap:4px;max-height:170px;overflow:auto}.cluster-head,.cluster-item{display:grid;grid-template-columns:minmax(0,1fr) 26px minmax(0,1fr);align-items:center;gap:8px;color:var(--muted);font-size:12px}.cluster-head{position:sticky;top:0;z-index:1;background:#111722;color:var(--text);font-weight:800;padding:2px 0 4px}.trade-cell{display:flex;align-items:center;gap:6px;min-width:0}.trade-cell span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.trade-arrow{text-align:center;color:var(--muted);font-weight:800}.mini-icon{width:22px;height:22px;border-radius:5px;background:#0d1118;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;overflow:hidden}.mini-icon img{width:100%;height:100%;object-fit:cover;display:block}.mini-icon.placeholder{color:var(--muted);font-size:10px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.player.avatar{width:34px;height:34px;aspect-ratio:1/1;background:#111722;color:transparent;border-radius:50%;overflow:visible}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item b .shop-icon{width:34px;height:34px;flex-basis:34px}.item b span{min-width:0;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.cluster-detail-vendor{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.cluster-detail-vendor h3{font-size:14px;margin:0 0 6px}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){body{overflow:hidden}.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:8px;gap:8px}.brand{width:100%;font-size:16px}.brand-icon{font-size:20px}.toolbar{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px}.toolbar .btn{padding:8px}.toolbar .status{grid-column:1/-1;font-size:12px;min-height:18px}.mobile-tabs{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;width:100%}.mobile-tab{border:1px solid var(--line);background:#202633;color:var(--text);border-radius:12px;min-height:42px;font-size:20px;cursor:pointer}.mobile-tab.active{background:var(--accent);border-color:#e15b45;box-shadow:0 0 0 2px rgba(206,65,43,.25)}.layout{display:block;height:calc(100dvh - 148px);min-height:0}.sidebar,.details,.map-panel{display:none}.map-panel{height:100%}body[data-mobile-panel="map"] .map-panel{display:block}body[data-mobile-panel="controls"] .sidebar,body[data-mobile-panel="prices"] .sidebar,body[data-mobile-panel="vendors"] .sidebar,body[data-mobile-panel="home"] .sidebar,body[data-mobile-panel="events"] .sidebar{display:block;height:100%;overflow:auto;border:0;padding:10px}.sidebar .card{display:none;margin-bottom:10px}body[data-mobile-panel="controls"] .sidebar [data-mobile-panel="controls"],body[data-mobile-panel="prices"] .sidebar [data-mobile-panel="prices"],body[data-mobile-panel="vendors"] .sidebar [data-mobile-panel="vendors"],body[data-mobile-panel="home"] .sidebar [data-mobile-panel="home"],body[data-mobile-panel="events"] .sidebar [data-mobile-panel="events"]{display:block}.details:not(.closed){display:block;position:fixed;top:148px;left:0;right:0;bottom:0;width:100%;z-index:30;border-left:0;box-shadow:0 -20px 45px rgba(0,0,0,.45)}.map-help{top:8px;left:8px;right:8px;font-size:12px;text-align:center}.empty{left:12px;right:12px;bottom:12px}.map-buttons{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}`;
+  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.mobile-tabs{display:none}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab;touch-action:none;overscroll-behavior:contain}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.draw-layer{position:absolute;left:0;top:0;transform-origin:0 0;pointer-events:none}.draw-overlay{position:absolute;top:12px;right:12px;z-index:4;display:flex;gap:6px}.draw-overlay .btn{padding:8px 10px}.draw-overlay input[type="color"]{width:38px;height:38px;padding:0;border:1px solid var(--line);border-radius:8px;background:#111827}.draw-overlay .btn.active{border-color:#fbbf24;box-shadow:0 0 0 2px rgba(251,191,36,.25)}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list,.profit-list,.price-check-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row,.profit-row,.price-check-row{display:grid;grid-template-columns:38px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover,.profit-row:hover,.price-check-row:hover,.cheap-option:hover{background:#1b2230}.shop-icon{position:relative;width:36px;height:36px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 36px}.shop-icon.stock-in{border-color:rgba(74,222,128,.85);box-shadow:0 0 0 1px rgba(74,222,128,.18)}.shop-icon.stock-out{border-color:rgba(239,68,68,.85);box-shadow:0 0 0 1px rgba(239,68,68,.18)}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.stock-badge{position:absolute;right:-2px;bottom:-2px;min-width:15px;height:15px;padding:0 4px;border-radius:999px;background:#111827;border:1px solid rgba(255,255,255,.75);color:#fff;font-size:10px;line-height:13px;font-weight:900;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.55);pointer-events:none}.shop-icon.stock-out .stock-badge{background:#7f1d1d}.cheap-main,.profit-main,.price-check-main{min-width:0}.cheap-title,.cheap-cost,.profit-title,.profit-route,.price-check-title,.price-check-route,.cheap-option-title,.cheap-option-meta{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title,.profit-title,.price-check-title{font-weight:700}.cheap-cost,.profit-route,.price-check-route{color:var(--muted);font-size:12px}.profit-gain,.price-check-location{color:var(--good);font-size:12px;font-weight:800}.cheap-options{grid-column:1/-1;margin:2px 0 0 46px;border-left:2px solid var(--line);display:grid;gap:2px}.cheap-option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:7px 9px;border-radius:8px;cursor:pointer}.cheap-option-title{font-weight:700;font-size:12px}.cheap-option-meta{color:var(--muted);font-size:12px}.price-check-location{color:var(--warn)}.home-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:8px}.home-grid .input{width:100%;min-width:0}#homeRadius{grid-column:1/-1}#homeStatus{margin-top:8px}.refresh-setting{display:block;margin-top:10px}.refresh-setting .input{margin-top:5px}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.pill.danger{color:#2a0606;background:#ef4444}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible;padding:0;background-position:center;background-repeat:no-repeat;background-size:cover}.marker:hover,.marker:focus,.marker:focus-within{z-index:1000}.marker.vending{width:38px;height:38px;background:transparent;border:0;border-radius:0;box-shadow:none}.marker.vending.stock-in .marker-image,.marker.cluster.stock-in .marker-image{filter:drop-shadow(0 0 7px rgba(74,222,128,.95)) drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker.vending.stock-out .marker-image,.marker.cluster.stock-out .marker-image{filter:drop-shadow(0 0 7px rgba(248,113,113,.95)) drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker.vending.stock-in::after,.marker.vending.stock-out::after,.marker.cluster.stock-in::after,.marker.cluster.stock-out::after{content:'';position:absolute;right:1px;bottom:1px;width:11px;height:11px;border-radius:50%;border:2px solid #0c0f14;background:var(--good);z-index:3}.marker.vending.stock-out::after,.marker.cluster.stock-out::after{background:#ef4444}.marker.vending .marker-label{top:35px}.marker.home{width:30px;height:30px;background:var(--good);color:#062411;border-radius:50%;font-weight:900;font-size:14px}.marker.cluster{width:40px;height:40px;background:transparent;border:0;border-radius:0;box-shadow:none;font-weight:900}.marker-image{width:100%;height:100%;display:block;object-fit:contain;filter:drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker-image.avatar-image{aspect-ratio:1/1;object-fit:cover;border-radius:50%;filter:none}.cluster-count{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;font-weight:1000;line-height:1;text-shadow:0 2px 0 #000,0 -2px 0 #000,2px 0 0 #000,-2px 0 0 #000,0 3px 8px #000}.cluster-popover,.vendor-popover{display:none;position:absolute;left:50%;top:calc(100% - 2px);transform:translateX(-50%) scale(var(--inverse-scale,1));transform-origin:top center;width:380px;max-height:360px;overflow-y:auto;overscroll-behavior:contain;background:#111722;border:1px solid var(--line);border-radius:12px;padding:10px;text-align:left;box-shadow:0 12px 42px rgba(0,0,0,.65);z-index:1001}.marker.cluster:hover .cluster-popover,.marker.cluster:focus .cluster-popover,.marker.cluster:focus-within .cluster-popover,.marker.cluster.selected .cluster-popover,.marker.vending:hover .vendor-popover,.marker.vending:focus .vendor-popover,.marker.vending:focus-within .vendor-popover,.marker.vending.selected .vendor-popover{display:block}.cluster-title{font-weight:900;margin-bottom:6px}.cluster-vendor{border-top:1px solid var(--line);padding:7px 0}.cluster-vendor:first-of-type{border-top:0}.cluster-items{display:grid;gap:4px;max-height:170px;overflow:auto}.cluster-head,.cluster-item{display:grid;grid-template-columns:minmax(0,1fr) 26px minmax(0,1fr);align-items:center;gap:8px;color:var(--muted);font-size:12px}.cluster-head{position:sticky;top:0;z-index:1;background:#111722;color:var(--text);font-weight:800;padding:2px 0 4px}.trade-cell{display:flex;align-items:center;gap:6px;min-width:0}.trade-cell span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.trade-arrow{text-align:center;color:var(--muted);font-weight:800}.mini-icon{width:22px;height:22px;border-radius:5px;background:#0d1118;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;overflow:hidden}.mini-icon img{width:100%;height:100%;object-fit:cover;display:block}.mini-icon.placeholder{color:var(--muted);font-size:10px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.player.avatar{width:34px;height:34px;aspect-ratio:1/1;background:#111722;color:transparent;border-radius:50%;overflow:visible}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item b .shop-icon{width:34px;height:34px;flex-basis:34px}.item b span{min-width:0;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.cluster-detail-vendor{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.cluster-detail-vendor h3{font-size:14px;margin:0 0 6px}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){body{overflow:hidden}.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:8px;gap:8px}.brand{width:100%;font-size:16px}.brand-icon{font-size:20px}.toolbar{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px}.toolbar .btn{padding:8px}.toolbar .status{grid-column:1/-1;font-size:12px;min-height:18px}.mobile-tabs{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;width:100%}.mobile-tab{border:1px solid var(--line);background:#202633;color:var(--text);border-radius:12px;min-height:42px;font-size:20px;cursor:pointer}.mobile-tab.active{background:var(--accent);border-color:#e15b45;box-shadow:0 0 0 2px rgba(206,65,43,.25)}.layout{display:block;height:calc(100dvh - 148px);min-height:0}.sidebar,.details,.map-panel{display:none}.map-panel{height:100%}body[data-mobile-panel="map"] .map-panel{display:block}body[data-mobile-panel="controls"] .sidebar,body[data-mobile-panel="prices"] .sidebar,body[data-mobile-panel="vendors"] .sidebar,body[data-mobile-panel="home"] .sidebar,body[data-mobile-panel="events"] .sidebar{display:block;height:100%;overflow:auto;border:0;padding:10px}.sidebar .card{display:none;margin-bottom:10px}body[data-mobile-panel="controls"] .sidebar [data-mobile-panel="controls"],body[data-mobile-panel="prices"] .sidebar [data-mobile-panel="prices"],body[data-mobile-panel="vendors"] .sidebar [data-mobile-panel="vendors"],body[data-mobile-panel="home"] .sidebar [data-mobile-panel="home"],body[data-mobile-panel="events"] .sidebar [data-mobile-panel="events"]{display:block}.details:not(.closed){display:block;position:fixed;top:148px;left:0;right:0;bottom:0;width:100%;z-index:30;border-left:0;box-shadow:0 -20px 45px rgba(0,0,0,.45)}.map-help{top:8px;left:8px;right:8px;font-size:12px;text-align:center}.empty{left:12px;right:12px;bottom:12px}.map-buttons{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}`;
 }
 
 function appJs() {
@@ -1188,13 +1265,13 @@ function appJs() {
   const STACKED_VENDING_MACHINE_MARKER_IMAGE = ${JSON.stringify(STACKED_VENDING_MACHINE_MARKER_IMAGE)};
   const qs = new URLSearchParams(location.search);
   const token = qs.get('token') || '';
-  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{}, popoverScrollTop:0 };
+  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{}, popoverScrollTop:0, hiddenItems:new Set(), vendorListVisible:false, annotations:{markers:[],strokes:[]}, drawMode:false, eraserMode:false, currentStroke:null, drawing:false, annotationsDirty:false, lineColor:'#fbbf24' };
   const els = {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
     showOutOfStock: document.getElementById('showOutOfStock'), hideEmptyVending: document.getElementById('hideEmptyVending'), showPlayers: document.getElementById('showPlayers'), showMonuments: document.getElementById('showMonuments'),
     vendorList: document.getElementById('vendorList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), priceCheckList: document.getElementById('priceCheckList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
-    layer: document.getElementById('markerLayer'), empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast'), homeX: document.getElementById('homeX'), homeY: document.getElementById('homeY'), homeRadius: document.getElementById('homeRadius'), homeStatus: document.getElementById('homeStatus'), refreshSeconds: document.getElementById('refreshSeconds')
+    layer: document.getElementById('markerLayer'), drawCanvas: null, empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast'), homeX: document.getElementById('homeX'), homeY: document.getElementById('homeY'), homeRadius: document.getElementById('homeRadius'), homeStatus: document.getElementById('homeStatus'), refreshSeconds: document.getElementById('refreshSeconds'), hiddenItems: document.getElementById('hiddenItems'), toggleVendorList: document.getElementById('toggleVendorList'), lineColor: document.getElementById('lineColor')
   };
   const headers = { 'x-vendor-map-token': token };
 
@@ -1208,7 +1285,12 @@ function appJs() {
     try {
       setMobilePanel(document.body.dataset.mobilePanel || 'map');
       setupMapInteraction();
+      els.drawCanvas = document.createElement('canvas'); els.drawCanvas.className='draw-layer'; els.map.appendChild(els.drawCanvas);
       bindControls();
+      const savedHidden = (localStorage.getItem('vendorMapHiddenItems') || '').toLowerCase();
+      els.hiddenItems.value = savedHidden;
+      state.hiddenItems = new Set(savedHidden.split(',').map(v => v.trim()).filter(Boolean));
+      els.lineColor.value = state.lineColor;
       const guilds = await api('/api/guilds');
       els.guild.innerHTML = '';
       (guilds.guilds || []).forEach(g => { const o = document.createElement('option'); o.value = g.id; o.textContent = g.name + (g.connected ? ' • connected' : ' • offline'); els.guild.appendChild(o); });
@@ -1233,7 +1315,29 @@ function appJs() {
     document.getElementById('clearHome').addEventListener('click', clearHome);
     document.getElementById('homeFromSelected').addEventListener('click', setHomeFromSelected);
     document.getElementById('saveRefresh').addEventListener('click', saveRefreshInterval);
+    document.getElementById('addMarkerAtCenter').addEventListener('click', addMarkerAtCenter);
+    document.getElementById('toggleDraw').addEventListener('click', toggleDrawMode);
+    document.getElementById('toggleDrawOverlay').addEventListener('click', toggleDrawMode);
+    document.getElementById('toggleEraserOverlay').addEventListener('click', toggleEraserMode);
+    document.getElementById('clearDrawings').addEventListener('click', clearDrawings);
+    els.lineColor.addEventListener('input', () => { state.lineColor = els.lineColor.value || '#fbbf24'; renderAnnotations(); });
+    els.hiddenItems.addEventListener('change', () => {
+      const raw = (els.hiddenItems.value || '').toLowerCase();
+      localStorage.setItem('vendorMapHiddenItems', raw);
+      state.hiddenItems = new Set(raw.split(',').map(v => v.trim()).filter(Boolean));
+      render();
+    });
+    els.toggleVendorList.addEventListener('click', () => {
+      state.vendorListVisible = !state.vendorListVisible;
+      els.vendorList.style.display = state.vendorListVisible ? 'grid' : 'none';
+      els.toggleVendorList.textContent = state.vendorListVisible ? 'Hide vendor list' : 'Show vendor list';
+    });
     document.querySelectorAll('.mobile-tab[data-panel]').forEach(tab => tab.addEventListener('click', () => setMobilePanel(tab.dataset.panel)));
+    const pointFromEvent = (e) => { const r = els.map.getBoundingClientRect(); return { x:(e.clientX - r.left - state.x)/state.scale, y:(e.clientY - r.top - state.y)/state.scale }; };
+    els.map.addEventListener('pointerdown', (e)=>{ if(!state.drawMode) return; e.preventDefault(); e.stopPropagation(); state.drawing=true; const pt=pointFromEvent(e); state.currentStroke=[pt]; });
+    els.map.addEventListener('pointermove', (e)=>{ if(!state.drawMode||!state.drawing) return; e.preventDefault(); e.stopPropagation(); state.currentStroke.push(pointFromEvent(e)); renderAnnotations(); });
+    els.map.addEventListener('pointerup', async (e)=>{ if(!state.drawMode||!state.drawing) return; e.preventDefault(); e.stopPropagation(); state.drawing=false; if(state.currentStroke&&state.currentStroke.length>1){ state.annotations.strokes.push({ mode: state.eraserMode ? 'erase' : 'draw', color: state.lineColor, points: state.currentStroke }); state.annotationsDirty = true; } state.currentStroke=null; renderAnnotations(); });
+    els.map.addEventListener('pointercancel', ()=>{ state.drawing=false; state.currentStroke=null; });
   }
 
   function setMobilePanel(panel){
@@ -1247,6 +1351,8 @@ function appJs() {
     setStatus('Loading…');
     const data = await api('/api/vendor-map?guildId=' + encodeURIComponent(els.guild.value));
     state.data = data;
+    state.annotations = data.config?.annotations || { markers: [], strokes: [] };
+    state.annotationsDirty = false;
     els.showOutOfStock.checked = false;
     els.refreshSeconds.value = Math.max(2, data.config?.autoRefreshSeconds || 5);
     syncHomeInputs(data.config?.home || null);
@@ -1259,10 +1365,16 @@ function appJs() {
   }
 
   async function refreshQuietly(){
+    if (state.drawMode || state.drawing) return;
     try {
       const data = await api('/api/vendor-map?guildId=' + encodeURIComponent(els.guild.value));
       const oldImage = state.data?.map?.image;
       state.data = data;
+      const canSyncAnnotations = !state.drawMode && !state.drawing && !state.currentStroke && !state.annotationsDirty;
+      if (canSyncAnnotations) {
+        state.annotations = data.config?.annotations || { markers: [], strokes: [] };
+        state.annotationsDirty = false;
+      }
       if (document.activeElement !== els.refreshSeconds) els.refreshSeconds.value = Math.max(2, data.config?.autoRefreshSeconds || 5);
       syncHomeInputs(data.config?.home || null, false);
       if (data.map?.image && data.map.image !== oldImage) renderMapImage(data.map);
@@ -1289,6 +1401,7 @@ function appJs() {
     renderProfitTrades();
     renderVendorList(filtered);
     renderMarkers(filtered);
+    renderAnnotations();
     renderEvents(data.events || []);
     if (state.selectedId) {
       const selectedCluster = findClusterById(state.selectedId, filtered);
@@ -1301,6 +1414,14 @@ function appJs() {
 
   function stat(value, label){ return '<div class="stat"><b>' + escapeHtml(value ?? 0) + '</b><span>' + escapeHtml(label) + '</span></div>'; }
 
+  function isHiddenOrder(order){
+    if (!order) return false;
+    if (!state.hiddenItems.size) return false;
+    const hay = [order.itemName, order.itemShortName, order.currencyName, order.currencyShortName].join(' ').toLowerCase();
+    for (const token of state.hiddenItems) { if (token && hay.includes(token)) return true; }
+    return false;
+  }
+
   function getFilteredVendors(){
     const data = state.data || {}; const q = els.search.value.trim().toLowerCase(); const out = [];
     if (els.showVending.checked) out.push(...(data.vendors?.vendingMachines || []));
@@ -1312,7 +1433,7 @@ function appJs() {
       }
       if (!q) return true;
       const vendorText = [v.label, v.location, v.grid, v.type].join(' ').toLowerCase();
-      return vendorText.includes(q) || (v.orders || []).some(o => o.searchText.includes(q));
+      return vendorText.includes(q) || (v.orders || []).some(o => !isHiddenOrder(o) && o.searchText.includes(q));
     });
   }
 
@@ -1361,10 +1482,34 @@ function appJs() {
 
   function renderPriceChecks(){
     const q = els.search.value.trim().toLowerCase();
-    const checks = (state.data?.priceChecks || []).filter(check => !q || (check.searchText || '').includes(q));
+    const checks = (state.data?.priceChecks || []).filter(check => !isHiddenOrder(check) && (!q || (check.searchText || '').includes(q)));
     if (!state.data?.config?.home) { els.priceCheckList.innerHTML = '<div class="muted">Set your home location to compare your nearby vendors against the rest of the map.</div>'; return; }
     if (!checks.length) { els.priceCheckList.innerHTML = '<div class="muted">No cheaper competing vendors found for home-area prices.</div>'; return; }
-    els.priceCheckList.innerHTML = checks.slice(0, 16).map(check => '<div class="price-check-row" data-home-id="' + escapeHtml(check.homeVendorId) + '" data-comp-id="' + escapeHtml(check.competitorVendorId) + '">' + squareIcon(check) + '<div class="price-check-main"><div class="price-check-title">' + escapeHtml(check.itemName) + ' is cheaper elsewhere by ' + escapeHtml(check.cheaperPercent.toFixed(1)) + '%</div><div class="price-check-route">Our price: ' + escapeHtml(check.homeQuantity + '× for ' + check.homeCost + ' ' + check.currencyName) + ' · Their price: ' + escapeHtml(check.competitorQuantity + '× for ' + check.competitorCost + ' ' + check.currencyName) + '</div><div class="price-check-location">Their location: ' + escapeHtml(check.competitorGrid || check.competitorLocation || '?') + '</div></div></div>').join('');
+
+    const grouped = new Map();
+    checks.forEach(check => {
+      const key = [check.itemId, check.currencyId, check.homeQuantity, check.homeCost, !!check.itemBlueprint, !!check.currencyBlueprint].join(':');
+      const current = grouped.get(key);
+      if (!current) grouped.set(key, { ...check, competitorVendorIds:[check.competitorVendorId], competitorLocations:[check.competitorGrid || check.competitorLocation || '?'] });
+      else {
+        current.competitorVendorIds.push(check.competitorVendorId);
+        current.competitorLocations.push(check.competitorGrid || check.competitorLocation || '?');
+        if (check.cheaperPercent > current.cheaperPercent || (check.cheaperPercent === current.cheaperPercent && check.cheaperBy > current.cheaperBy)) {
+          const keepIds = current.competitorVendorIds;
+          const keepLocs = current.competitorLocations;
+          Object.assign(current, check);
+          current.competitorVendorIds = keepIds;
+          current.competitorLocations = keepLocs;
+        }
+      }
+    });
+
+    const rows = [...grouped.values()].sort((a, b) => b.cheaperPercent - a.cheaperPercent || b.cheaperBy - a.cheaperBy).slice(0, 16);
+    els.priceCheckList.innerHTML = rows.map(check => {
+      const uniqueLocations = [...new Set(check.competitorLocations)];
+      const extra = uniqueLocations.length > 1 ? (' · ' + (uniqueLocations.length - 1) + ' more competing shops') : '';
+      return '<div class="price-check-row" data-home-id="' + escapeHtml(check.homeVendorId) + '" data-comp-id="' + escapeHtml(check.competitorVendorId) + '">' + squareIcon(check) + '<div class="price-check-main"><div class="price-check-title">' + escapeHtml(check.itemName) + ' is cheaper elsewhere by up to ' + escapeHtml(check.cheaperPercent.toFixed(1)) + '%</div><div class="price-check-route">Our price: ' + escapeHtml(check.homeQuantity + '× for ' + check.homeCost + ' ' + check.currencyName) + ' · Best found: ' + escapeHtml(check.competitorQuantity + '× for ' + check.competitorCost + ' ' + check.currencyName) + '</div><div class="price-check-location">Best location: ' + escapeHtml(uniqueLocations[0] || '?') + escapeHtml(extra) + '</div></div></div>';
+    }).join('');
     els.priceCheckList.querySelectorAll('.price-check-row').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.compId)));
   }
 
@@ -1373,7 +1518,7 @@ function appJs() {
     const byCategory = state.data?.cheapestByCategory || {}; const q = els.search.value.trim().toLowerCase();
     const blocks = [];
     Object.entries(byCategory).forEach(([category, offers]) => {
-      const visible = (offers || []).filter(o => !q || (o.searchText || '').includes(q));
+      const visible = (offers || []).filter(o => !isHiddenOrder(o) && (!q || (o.searchText || '').includes(q)));
       if (!visible.length) return;
       blocks.push('<div class="category-block"><div class="category-head"><span>' + escapeHtml(category) + '</span><span class="muted">' + visible.length + '</span></div>' + visible.slice(0, 12).map(cheapOfferHtml).join('') + (visible.length > 12 ? '<div class="cheap-row muted"><div></div><div>+' + (visible.length - 12) + ' more, narrow search to reveal</div></div>' : '') + '</div>');
     });
@@ -1424,7 +1569,7 @@ function appJs() {
 
   function renderProfitTrades(){
     const q = els.search.value.trim().toLowerCase();
-    const routes = (state.data?.profitTrades || []).filter(route => !q || (route.searchText || '').includes(q));
+    const routes = (state.data?.profitTrades || []).filter(route => !isHiddenOrder(route) && (!q || (route.searchText || '').includes(q)));
     if (!routes.length) { els.profitList.innerHTML = '<div class="muted">No profitable buy/sell routes found.</div>'; return; }
     els.profitList.innerHTML = routes.slice(0, 12).map(route => '<div class="profit-row" data-buy-id="' + escapeHtml(route.buyVendorId) + '" data-sell-id="' + escapeHtml(route.sellVendorId) + '"><span class="shop-icon">↔️</span><div class="profit-main"><div class="profit-title">' + escapeHtml(route.itemName) + ' → +' + escapeHtml(route.totalProfit) + ' ' + escapeHtml(route.currencyName) + '</div><div class="profit-route">' + escapeHtml(route.routeText) + '</div><div class="profit-gain">Route: ' + escapeHtml(route.buyGrid || '?') + ' → ' + escapeHtml(route.sellGrid || '?') + ' · max ' + escapeHtml(route.tradableItemCount) + ' items</div></div></div>').join('');
     els.profitList.querySelectorAll('.profit-row').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.buyId)));
@@ -1437,6 +1582,49 @@ function appJs() {
       return '<div class="vendor-row ' + (v.id === state.selectedId ? 'active' : '') + '" data-id="' + escapeHtml(v.id) + '"><div class="vendor-title"><span>' + icon(v) + ' ' + escapeHtml(v.label) + '</span><span>' + escapeHtml(v.grid || '') + '</span></div><div class="vendor-meta">' + escapeHtml(v.location || 'Unknown location') + '</div><span class="pill ' + (v.type === 'traveling' ? 'warn' : ((v.inStockCount || 0) > 0 ? 'good' : 'danger')) + '">' + escapeHtml(stock) + '</span></div>';
     }).join('');
     els.vendorList.querySelectorAll('.vendor-row').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.id)));
+  }
+
+
+  function addMarkerAtCenter(){
+    const mapX = (-state.x + (els.map.clientWidth/2)) / state.scale;
+    const mapY = (-state.y + (els.map.clientHeight/2)) / state.scale;
+    state.annotations.markers.push({ x: Math.round(mapX), y: Math.round(mapY), label: 'Custom' });
+    state.annotationsDirty = true;
+    saveAnnotations();
+    render();
+  }
+
+  function syncDrawButtons(){
+    document.getElementById('toggleDraw').textContent = state.drawMode ? 'Stop drawing' : 'Start drawing';
+    document.getElementById('toggleDrawOverlay').classList.toggle('active', state.drawMode && !state.eraserMode);
+    document.getElementById('toggleEraserOverlay').classList.toggle('active', state.drawMode && state.eraserMode);
+    els.map.style.cursor = state.drawMode ? 'crosshair' : 'grab';
+    if (els.drawCanvas) els.drawCanvas.style.pointerEvents = state.drawMode ? 'auto' : 'none';
+  }
+
+  async function toggleDrawMode(){ state.drawMode = !state.drawMode; if (!state.drawMode) { state.eraserMode = false; if (state.annotationsDirty) await saveAnnotations(); await refreshQuietly(); } syncDrawButtons(); }
+  function toggleEraserMode(){ if (!state.drawMode) state.drawMode = true; state.eraserMode = !state.eraserMode; syncDrawButtons(); }
+
+  async function clearDrawings(){
+    state.annotations = { markers: [], strokes: [] };
+    state.annotationsDirty = true;
+    await saveAnnotations();
+    render();
+  }
+
+  async function saveAnnotations(){
+    try { await postJson('/api/annotations?guildId=' + encodeURIComponent(els.guild.value), state.annotations); state.annotationsDirty = false; } catch(_){ state.annotationsDirty = true; }
+  }
+
+  function renderAnnotations(){
+    if (!els.drawCanvas) return;
+    const cvs = els.drawCanvas;
+    cvs.width = Math.max(1, state.imgW || els.map.clientWidth); cvs.height = Math.max(1, state.imgH || els.map.clientHeight);
+    cvs.style.width = cvs.width + 'px'; cvs.style.height = cvs.height + 'px';
+    const ctx = cvs.getContext('2d'); ctx.clearRect(0,0,cvs.width,cvs.height); ctx.lineCap='round';
+    (state.annotations.strokes||[]).forEach(st=>{ const pts = Array.isArray(st) ? st : st?.points; if(!Array.isArray(pts)||pts.length<2)return; ctx.save(); if(st?.mode==='erase'){ ctx.globalCompositeOperation='destination-out'; ctx.lineWidth=20; ctx.strokeStyle='rgba(0,0,0,1)'; } else { ctx.globalCompositeOperation='source-over'; ctx.lineWidth=4; ctx.strokeStyle=st?.color || '#fbbf24'; } ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); pts.forEach(pt=>ctx.lineTo(pt.x, pt.y)); ctx.stroke(); ctx.restore(); });
+    if (state.currentStroke && state.currentStroke.length > 1) { ctx.save(); if(state.eraserMode){ ctx.globalCompositeOperation='destination-out'; ctx.lineWidth=20; ctx.strokeStyle='rgba(0,0,0,1)'; } else { ctx.lineWidth=4; ctx.strokeStyle=state.lineColor || '#fbbf24'; } ctx.beginPath(); ctx.moveTo(state.currentStroke[0].x, state.currentStroke[0].y); state.currentStroke.forEach(pt=>ctx.lineTo(pt.x, pt.y)); ctx.stroke(); ctx.restore(); }
+    (state.annotations.markers||[]).forEach(m=>{ ctx.fillStyle='#60a5fa'; ctx.beginPath(); ctx.arc(m.x,m.y,8,0,Math.PI*2); ctx.fill(); ctx.fillStyle='#fff'; ctx.fillText(m.label||'M', m.x+10, m.y-10); });
   }
 
   function renderMarkers(vendors){
@@ -1559,7 +1747,7 @@ function appJs() {
   function icon(v){ return v.type === 'home' ? '⌂' : v.type === 'traveling' ? '🚚' : v.type === 'player' ? '👤' : v.type === 'monument' ? '◆' : '🛒'; }
   function shortLabel(v){ if (v.type === 'home') return 'Home'; if (v.type === 'vending') return v.grid || 'Vendor'; if (v.type === 'traveling') return v.halted ? 'Halted' : 'Vendor'; return v.label || ''; }
   function worldToPixels(x,y){ if(!state.mapSize || !state.imgW || !state.imgH) return {x:0,y:0}; const effW = state.imgW - 2 * state.ocean; const effH = state.imgH - 2 * state.ocean; return { x: (x * (effW / state.mapSize)) + state.ocean, y: state.imgH - ((y * (effH / state.mapSize)) + state.ocean) }; }
-  function applyTransform(){ const t = 'translate(' + state.x + 'px,' + state.y + 'px) scale(' + state.scale + ')'; els.img.style.transform = t; els.layer.style.transform = t; els.layer.style.setProperty('--inverse-scale', String(1 / Math.max(state.scale || 1, 0.001))); }
+  function applyTransform(){ const t = 'translate(' + state.x + 'px,' + state.y + 'px) scale(' + state.scale + ')'; els.img.style.transform = t; els.layer.style.transform = t; if (els.drawCanvas) els.drawCanvas.style.transform = t; els.layer.style.setProperty('--inverse-scale', String(1 / Math.max(state.scale || 1, 0.001))); }
   function fitMap(){ const rect = els.map.getBoundingClientRect(); if(!state.imgW || !state.imgH || !rect.width || !rect.height) return; state.scale = Math.min(rect.width / state.imgW, rect.height / state.imgH) || 1; state.x = (rect.width - state.imgW * state.scale) / 2; state.y = (rect.height - state.imgH * state.scale) / 2; applyTransform(); }
   function centerOn(x,y){ const pos = worldToPixels(x,y); const rect = els.map.getBoundingClientRect(); if(!pos) return; state.x = rect.width / 2 - pos.x * state.scale; state.y = rect.height / 2 - pos.y * state.scale; applyTransform(); }
   function zoomAt(clientX, clientY, factor){ const rect = els.map.getBoundingClientRect(); const mx = clientX - rect.left, my = clientY - rect.top; const before = { x:(mx - state.x) / state.scale, y:(my - state.y) / state.scale }; state.scale = Math.max(0.12, Math.min(8, state.scale * factor)); state.x = mx - before.x * state.scale; state.y = my - before.y * state.scale; applyTransform(); }
@@ -1572,13 +1760,14 @@ function appJs() {
     window.addEventListener('mouseup', () => { dragging = false; els.map.classList.remove('dragging'); });
     window.addEventListener('mousemove', e => { if(!dragging) return; state.x += e.clientX - lx; state.y += e.clientY - ly; lx = e.clientX; ly = e.clientY; applyTransform(); });
     els.map.addEventListener('wheel', e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.15 : 0.87); }, { passive:false });
-    els.map.addEventListener('touchstart', e => {
+    els.map.addEventListener('touchstart', e => { if (state.drawMode) return;
       if (e.touches.length === 1) { dragging = true; lx = e.touches[0].clientX; ly = e.touches[0].clientY; els.map.classList.add('dragging'); }
       else if (e.touches.length === 2) { dragging = false; lastPinchDistance = touchDistance(e.touches[0], e.touches[1]); }
     }, { passive:false });
     els.map.addEventListener('touchmove', e => {
       e.preventDefault();
       if (e.touches.length === 2) { const nextDistance = touchDistance(e.touches[0], e.touches[1]); if (lastPinchDistance > 0) { const midpoint = touchMidpoint(e.touches[0], e.touches[1]); zoomAt(midpoint.clientX, midpoint.clientY, nextDistance / lastPinchDistance); } lastPinchDistance = nextDistance; return; }
+      if (state.drawMode) return;
       if (e.touches.length === 1 && dragging) { const touch = e.touches[0]; state.x += touch.clientX - lx; state.y += touch.clientY - ly; lx = touch.clientX; ly = touch.clientY; applyTransform(); }
     }, { passive:false });
     ['touchend','touchcancel'].forEach(evt => els.map.addEventListener(evt, e => { if (e.touches.length < 2) lastPinchDistance = 0; if (e.touches.length === 0) { dragging = false; els.map.classList.remove('dragging'); } }, { passive:false }));
