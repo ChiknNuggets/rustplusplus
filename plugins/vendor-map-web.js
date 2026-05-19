@@ -925,7 +925,6 @@ function buildPriceChecks(vendors, home) {
   const checks = [];
   for (const homeVendor of homeVendors) {
     for (const homeOrder of homeVendor.orders || []) {
-      if (!homeOrder.inStock) continue;
       const homeUnitCost = (homeOrder.cost || 0) / Math.max(1, homeOrder.quantity || 1);
       for (const competitor of machines) {
         if (homeVendors.some((vendor) => vendor.id === competitor.id)) continue;
@@ -1364,7 +1363,31 @@ function appJs() {
     const checks = (state.data?.priceChecks || []).filter(check => !q || (check.searchText || '').includes(q));
     if (!state.data?.config?.home) { els.priceCheckList.innerHTML = '<div class="muted">Set your home location to compare your nearby vendors against the rest of the map.</div>'; return; }
     if (!checks.length) { els.priceCheckList.innerHTML = '<div class="muted">No cheaper competing vendors found for home-area prices.</div>'; return; }
-    els.priceCheckList.innerHTML = checks.slice(0, 16).map(check => '<div class="price-check-row" data-home-id="' + escapeHtml(check.homeVendorId) + '" data-comp-id="' + escapeHtml(check.competitorVendorId) + '">' + squareIcon(check) + '<div class="price-check-main"><div class="price-check-title">' + escapeHtml(check.itemName) + ' is cheaper elsewhere by ' + escapeHtml(check.cheaperPercent.toFixed(1)) + '%</div><div class="price-check-route">Our price: ' + escapeHtml(check.homeQuantity + '× for ' + check.homeCost + ' ' + check.currencyName) + ' · Their price: ' + escapeHtml(check.competitorQuantity + '× for ' + check.competitorCost + ' ' + check.currencyName) + '</div><div class="price-check-location">Their location: ' + escapeHtml(check.competitorGrid || check.competitorLocation || '?') + '</div></div></div>').join('');
+
+    const grouped = new Map();
+    checks.forEach(check => {
+      const key = [check.itemId, check.currencyId, check.homeQuantity, check.homeCost, !!check.itemBlueprint, !!check.currencyBlueprint].join(':');
+      const current = grouped.get(key);
+      if (!current) grouped.set(key, { ...check, competitorVendorIds:[check.competitorVendorId], competitorLocations:[check.competitorGrid || check.competitorLocation || '?'] });
+      else {
+        current.competitorVendorIds.push(check.competitorVendorId);
+        current.competitorLocations.push(check.competitorGrid || check.competitorLocation || '?');
+        if (check.cheaperPercent > current.cheaperPercent || (check.cheaperPercent === current.cheaperPercent && check.cheaperBy > current.cheaperBy)) {
+          const keepIds = current.competitorVendorIds;
+          const keepLocs = current.competitorLocations;
+          Object.assign(current, check);
+          current.competitorVendorIds = keepIds;
+          current.competitorLocations = keepLocs;
+        }
+      }
+    });
+
+    const rows = [...grouped.values()].sort((a, b) => b.cheaperPercent - a.cheaperPercent || b.cheaperBy - a.cheaperBy).slice(0, 16);
+    els.priceCheckList.innerHTML = rows.map(check => {
+      const uniqueLocations = [...new Set(check.competitorLocations)];
+      const extra = uniqueLocations.length > 1 ? (' · ' + (uniqueLocations.length - 1) + ' more competing shops') : '';
+      return '<div class="price-check-row" data-home-id="' + escapeHtml(check.homeVendorId) + '" data-comp-id="' + escapeHtml(check.competitorVendorId) + '">' + squareIcon(check) + '<div class="price-check-main"><div class="price-check-title">' + escapeHtml(check.itemName) + ' is cheaper elsewhere by up to ' + escapeHtml(check.cheaperPercent.toFixed(1)) + '%</div><div class="price-check-route">Our price: ' + escapeHtml(check.homeQuantity + '× for ' + check.homeCost + ' ' + check.currencyName) + ' · Best found: ' + escapeHtml(check.competitorQuantity + '× for ' + check.competitorCost + ' ' + check.currencyName) + '</div><div class="price-check-location">Best location: ' + escapeHtml(uniqueLocations[0] || '?') + escapeHtml(extra) + '</div></div></div>';
+    }).join('');
     els.priceCheckList.querySelectorAll('.price-check-row').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.compId)));
   }
 
