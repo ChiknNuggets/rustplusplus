@@ -2,6 +2,7 @@
 // Runs a local, token-protected web UI for browsing vending machines and traveling vendors.
 
 const http = require('http');
+const https = require('https');
 const { URL } = require('url');
 const Path = require('path');
 const Fs = require('fs');
@@ -438,6 +439,29 @@ async function buildMapPayload(client, guildId, rustplus, exportOnly) {
   return payload;
 }
 
+
+function fetchSteamAvatarFromXml(steamId) {
+  return new Promise((resolve) => {
+    const url = `https://steamcommunity.com/profiles/${encodeURIComponent(steamId)}?xml=1`;
+    const req = https.get(url, { headers: { 'user-agent': 'rustplusplus-vendor-map' } }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        resolve(null);
+        return;
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        const match = body.match(/<avatarFull><!\[CDATA\[(.*?)\]\]><\/avatarFull>/i);
+        resolve(match?.[1] || null);
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(5000, () => { req.destroy(); resolve(null); });
+  });
+}
+
 async function getSteamAvatarUrl(client, steamId) {
   if (!steamId) return null;
   const now = Date.now();
@@ -446,7 +470,8 @@ async function getSteamAvatarUrl(client, steamId) {
 
   try {
     const scrapedAvatarUrl = await Scrape.scrapeSteamProfilePicture(client, steamId);
-    const avatarUrl = scrapedAvatarUrl || `${UNAVATAR_STEAM_URL}${encodeURIComponent(steamId)}`;
+    const xmlAvatarUrl = scrapedAvatarUrl ? null : await fetchSteamAvatarFromXml(steamId);
+    const avatarUrl = scrapedAvatarUrl || xmlAvatarUrl || `${UNAVATAR_STEAM_URL}${encodeURIComponent(steamId)}`;
     steamAvatarCache.set(steamId, {
       avatarUrl,
       expiresAt: now + STEAM_AVATAR_CACHE_MS
@@ -454,7 +479,8 @@ async function getSteamAvatarUrl(client, steamId) {
     return avatarUrl;
   }
   catch (_) {
-    const fallbackAvatarUrl = `${UNAVATAR_STEAM_URL}${encodeURIComponent(steamId)}`;
+    const xmlAvatarUrl = await fetchSteamAvatarFromXml(steamId);
+    const fallbackAvatarUrl = xmlAvatarUrl || `${UNAVATAR_STEAM_URL}${encodeURIComponent(steamId)}`;
     steamAvatarCache.set(steamId, {
       avatarUrl: fallbackAvatarUrl,
       expiresAt: now + STEAM_AVATAR_RETRY_MS
