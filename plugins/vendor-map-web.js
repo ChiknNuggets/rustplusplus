@@ -1405,7 +1405,7 @@ function appJs() {
   const STACKED_VENDING_MACHINE_MARKER_IMAGE = ${JSON.stringify(STACKED_VENDING_MACHINE_MARKER_IMAGE)};
   const qs = new URLSearchParams(location.search);
   const token = qs.get('token') || '';
-  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{}, popoverScrollTop:0, hiddenItems:new Set(), vendorListVisible:false, annotations:{markers:[],strokes:[]}, drawMode:false, eraserMode:false, currentStroke:null, drawing:false, annotationsDirty:false, lineColor:'#fbbf24' };
+  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{}, popoverScrollTop:0, hiddenItems:new Set(), vendorListVisible:false, annotations:{markers:[],strokes:[]}, drawMode:false, eraserMode:false, currentStroke:null, drawing:false, annotationsDirty:false, lineColor:'#fbbf24', teamData:null, teamUpdatedAt:0 };
   const els = {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
@@ -1497,7 +1497,7 @@ function appJs() {
     if (teamPage) teamPage.style.display = current === 'team' ? 'block' : 'none';
     document.querySelectorAll('.desktop-tab[data-view]').forEach(tab => tab.classList.toggle('active', tab.dataset.view === current));
     if (current === 'map') setTimeout(fitMap, 0);
-    else renderTeamManagement();
+    else refreshTeamData(true).then(() => renderTeamManagement());
   }
 
   async function load(){
@@ -1510,6 +1510,7 @@ function appJs() {
     els.showOutOfStock.checked = false;
     els.refreshSeconds.value = Math.max(2, data.config?.autoRefreshSeconds || 5);
     syncHomeInputs(data.config?.home || null);
+    await refreshTeamData(true);
     renderMapImage(data.map || {});
     render();
     setStatus('Updated ' + new Date(data.generatedAt).toLocaleTimeString());
@@ -1532,10 +1533,22 @@ function appJs() {
       if (document.activeElement !== els.refreshSeconds) els.refreshSeconds.value = Math.max(2, data.config?.autoRefreshSeconds || 5);
       syncHomeInputs(data.config?.home || null, false);
       if (data.map?.image && data.map.image !== oldImage) renderMapImage(data.map);
+      if (document.body.dataset.desktopView === 'team' || document.body.dataset.mobilePanel === 'team') await refreshTeamData(false);
       render();
       setStatus('Updated ' + new Date(data.generatedAt).toLocaleTimeString());
     }
     catch (_) { /* keep stale data visible */ }
+  }
+
+  async function refreshTeamData(force){
+    if (!els.guild.value) return;
+    const stale = (Date.now() - state.teamUpdatedAt) > 60000;
+    if (!force && !stale && state.teamData) return;
+    try {
+      const team = await api('/api/team?guildId=' + encodeURIComponent(els.guild.value));
+      state.teamData = team;
+      state.teamUpdatedAt = Date.now();
+    } catch (_) { /* keep old cached team data */ }
   }
 
   function renderMapImage(map){
@@ -1554,7 +1567,7 @@ function appJs() {
     renderPriceChecks();
     renderProfitTrades();
     renderVendorList(filtered);
-    renderTeamManagement();
+    if (document.body.dataset.desktopView === 'team' || document.body.dataset.mobilePanel === 'team') renderTeamManagement();
     renderMarkers(filtered);
     renderAnnotations();
     renderEvents(data.events || []);
@@ -1742,7 +1755,8 @@ function appJs() {
   async function renderTeamManagement(){
     if (!els.teamList || !els.guild.value) return;
     try {
-      const team = await api('/api/team?guildId=' + encodeURIComponent(els.guild.value));
+      await refreshTeamData(false);
+      const team = state.teamData || { ok:false };
       if (!team.ok) { els.teamList.innerHTML = '<div class="muted">Team info unavailable.</div>'; return; }
       els.teamList.innerHTML = (team.members || []).map(m => {
         const avatar = m.avatarUrl ? '<img src="' + escapeHtml(m.avatarUrl) + '" />' : '👤';
