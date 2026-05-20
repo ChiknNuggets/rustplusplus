@@ -419,8 +419,10 @@ async function fetchBattleMetricsSummary(steamId, playerName = '', linkedPlayerI
       id = pBySteam?.data?.[0]?.id || null;
     }
     if (!id && playerName) {
-      const pByName = await fetch(`https://api.battlemetrics.com/players?filter[search]=${encodeURIComponent(playerName)}&page[size]=5`).then(r => r.ok ? r.json() : null);
-      id = pByName?.data?.[0]?.id || null;
+      const pByName = await fetch(`https://api.battlemetrics.com/players?filter[search]=${encodeURIComponent(playerName)}&page[size]=10`).then(r => r.ok ? r.json() : null);
+      const target = String(playerName).trim().toLowerCase();
+      const exact = (pByName?.data || []).find((row) => String(row?.attributes?.name || '').trim().toLowerCase() === target);
+      id = exact?.id || null;
     }
     if (!id) return { unavailable: true };
     const d = await fetch(`https://api.battlemetrics.com/players/${encodeURIComponent(id)}?include=server`).then(r => r.ok ? r.json() : null);
@@ -477,9 +479,15 @@ async function resolveAndStoreBattlemetricsLink(client, guildId, steamId, player
     if (!bmLocal?.ready || !bmLocal?.players) return null;
     const target = String(playerName).trim().toLowerCase();
     let matchId = null;
+    const exactTarget = String(playerName).trim().toLowerCase();
     for (const pid of (bmLocal.onlinePlayers || [])) {
       const n = String(bmLocal.players?.[pid]?.name || '').trim().toLowerCase();
-      if (n === target) { matchId = pid; break; }
+      if (n === exactTarget) { matchId = pid; break; }
+    }
+    if (!matchId) {
+      const entries = Object.entries(bmLocal.players || {});
+      const exactAny = entries.find(([_, data]) => String(data?.name || '').trim().toLowerCase() === exactTarget);
+      matchId = exactAny?.[0] || null;
     }
     if (!matchId) return null;
     if (steamId) saveBattlemetricsLink(client, guildId, steamId, matchId);
