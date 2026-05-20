@@ -1789,9 +1789,12 @@ function appJs() {
         const bmText = m.battlemetrics?.playtimeHours != null
           ? ('Battlemetric Hours: ' + m.battlemetrics.playtimeHours + 'h')
           : (m.battlemetrics?.playerId ? ('Battlemetric Hours: profile ' + m.battlemetrics.playerId + ' (no playtime)') : 'Battlemetric Hours: unavailable');
+        const bmLink = m.battlemetrics?.playerId
+          ? ('<div class="vendor-meta"><a href="https://www.battlemetrics.com/players/' + encodeURIComponent(m.battlemetrics.playerId) + '" target="_blank" rel="noopener noreferrer">View BattleMetrics profile</a></div>')
+          : '';
         const promoteBtn = team.hosterIsTeamLeader && !m.isLeader ? '<button class="btn full js-promote" data-steamid="' + escapeHtml(m.steamId) + '">Promote</button>' : '';
         const kickBtn = team.hosterIsTeamLeader && !m.isLeader ? '<button class="btn full js-kick" data-steamid="' + escapeHtml(m.steamId) + '">Kick</button>' : '';
-        return '<div class="vendor-row"><div class="vendor-title"><span class="shop-icon">' + avatar + '</span><span>' + escapeHtml(m.name) + (m.isLeader ? ' 👑' : '') + '</span></div><div class="vendor-meta">' + escapeHtml(m.steamId || '-') + (m.isOnline ? ' • online' : ' • offline') + '</div><div class="vendor-meta">' + escapeHtml(bmText) + '</div><div class="map-buttons" style="margin-top:8px">' + promoteBtn + kickBtn + '</div></div>';
+        return '<div class="vendor-row"><div class="vendor-title"><span class="shop-icon">' + avatar + '</span><span>' + escapeHtml(m.name) + (m.isLeader ? ' 👑' : '') + '</span></div><div class="vendor-meta">' + escapeHtml(m.steamId || '-') + (m.isOnline ? ' • online' : ' • offline') + '</div><div class="vendor-meta">' + escapeHtml(bmText) + '</div>' + bmLink + '<div class="map-buttons" style="margin-top:8px">' + promoteBtn + kickBtn + '</div></div>';
       }).join('') || '<div class="muted">No team members available.</div>';
       els.teamList.querySelectorAll('.js-promote').forEach(b => b.addEventListener('click', async () => { await postJson('/api/team/promote?guildId=' + encodeURIComponent(els.guild.value), { steamId: b.dataset.steamid }); toast('Promote request sent'); renderTeamManagement(); }));
       els.teamList.querySelectorAll('.js-kick').forEach(b => b.addEventListener('click', async () => {
