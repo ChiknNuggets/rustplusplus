@@ -341,14 +341,21 @@ async function getTeamData(client, url) {
   const rustplus = client.rustplusInstances?.[guildId];
   if (!rustplus?.team) return { ok: false, error: 'team data unavailable' };
   const hosterSteamId = getHosterSteamId(client, guildId);
-  const members = await Promise.all((rustplus.team.players || []).map(async (p) => ({
-    name: p.name || 'Unknown',
-    steamId: p.steamId || null,
-    isLeader: rustplus.team.leaderSteamId === p.steamId,
-    isOnline: !!p.isOnline,
-    avatarUrl: await getSteamAvatarUrl(client, p.steamId || null),
-    battlemetrics: await fetchBattleMetricsSummary(p.steamId || null, p.name || '')
-  })));
+  const members = [];
+  for (const p of (rustplus.team.players || [])) {
+    const steamId = p.steamId || null;
+    const name = p.name || 'Unknown';
+    const isOnline = !!p.isOnline;
+    const linkedBmId = await resolveAndStoreBattlemetricsLink(client, guildId, steamId, name, isOnline);
+    members.push({
+      name,
+      steamId,
+      isLeader: rustplus.team.leaderSteamId === p.steamId,
+      isOnline,
+      avatarUrl: await getSteamAvatarUrl(client, steamId),
+      battlemetrics: await fetchBattleMetricsSummary(steamId, name, linkedBmId)
+    });
+  }
   return { ok: true, hosterSteamId, hosterIsTeamLeader: hosterSteamId === rustplus.team.leaderSteamId, leaderSteamId: rustplus.team.leaderSteamId, members };
 }
 
@@ -377,10 +384,10 @@ async function postTeamKick(client, url, req, res) {
 
 function getHosterSteamId(client, guildId) { return client.getInstance(guildId)?.credentials?.hoster || null; }
 
-async function fetchBattleMetricsSummary(steamId, playerName = '') {
+async function fetchBattleMetricsSummary(steamId, playerName = '', linkedPlayerId = null) {
   if (!steamId && !playerName) return null;
   try {
-    let id = null;
+    let id = linkedPlayerId || null;
     if (steamId) {
       const pBySteam = await fetch(`https://api.battlemetrics.com/players?filter[search]=${encodeURIComponent(steamId)}&page[size]=1`).then(r => r.ok ? r.json() : null);
       id = pBySteam?.data?.[0]?.id || null;
@@ -396,6 +403,53 @@ async function fetchBattleMetricsSummary(steamId, playerName = '') {
     for (const s of d?.data?.relationships?.servers?.data || []) seconds += Number(s?.meta?.timePlayed || 0);
     return { playerId: id, playtimeHours: Math.round((seconds / 3600) * 10) / 10 };
   } catch (_) { return { unavailable: true }; }
+}
+
+function getBattlemetricsLinkMap(client, guildId) {
+  try {
+    const instance = client.getInstance(guildId);
+    const settings = instance?.pluginSettings?.[PLUGIN_NAME] || {};
+    const raw = settings.teamBattlemetricsLinks;
+    if (!raw || typeof raw !== 'string') return {};
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch (_) { return {}; }
+}
+
+function saveBattlemetricsLink(client, guildId, steamId, playerId) {
+  if (!steamId || !playerId) return;
+  try {
+    const instance = client.getInstance(guildId);
+    if (!instance.pluginSettings) instance.pluginSettings = {};
+    if (!instance.pluginSettings[PLUGIN_NAME]) instance.pluginSettings[PLUGIN_NAME] = {};
+    const links = getBattlemetricsLinkMap(client, guildId);
+    links[String(steamId)] = String(playerId);
+    instance.pluginSettings[PLUGIN_NAME].teamBattlemetricsLinks = JSON.stringify(links);
+    client.setInstance(guildId, instance);
+  } catch (_) { /* ignore */ }
+}
+
+async function resolveAndStoreBattlemetricsLink(client, guildId, steamId, playerName, isOnline) {
+  const links = getBattlemetricsLinkMap(client, guildId);
+  if (steamId && links[String(steamId)]) return String(links[String(steamId)]);
+  if (!isOnline || !playerName) return null;
+  try {
+    const instance = client.getInstance(guildId);
+    const active = instance?.activeServer;
+    const bmServerId = active && instance?.serverList?.[active] ? instance.serverList[active].battlemetricsId : null;
+    if (!bmServerId) return null;
+    const bmLocal = client?.battlemetricsInstances?.[bmServerId];
+    if (!bmLocal?.ready || !bmLocal?.players) return null;
+    const target = String(playerName).trim().toLowerCase();
+    let matchId = null;
+    for (const pid of (bmLocal.onlinePlayers || [])) {
+      const n = String(bmLocal.players?.[pid]?.name || '').trim().toLowerCase();
+      if (n === target) { matchId = pid; break; }
+    }
+    if (!matchId) return null;
+    if (steamId) saveBattlemetricsLink(client, guildId, steamId, matchId);
+    return String(matchId);
+  } catch (_) { return null; }
 }
 
 
