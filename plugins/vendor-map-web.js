@@ -18,8 +18,10 @@ let authToken = null;
 let configWatcher = null;
 let serverClosing = null;
 const steamAvatarCache = new Map();
+const battlemetricsHoursCache = new Map();
 const STEAM_AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
 const STEAM_AVATAR_RETRY_MS = 10 * 60 * 1000;
+const BATTLEMETRICS_HOURS_CACHE_MS = 12 * 60 * 60 * 1000;
 const UNAVATAR_STEAM_URL = 'https://unavatar.io/steam/';
 const recentEvents = new Map();
 const STATIC_FILE_DIRS = [
@@ -347,16 +349,40 @@ async function getTeamData(client, url) {
     const name = p.name || 'Unknown';
     const isOnline = !!p.isOnline;
     const linkedBmId = await resolveAndStoreBattlemetricsLink(client, guildId, steamId, name, isOnline);
+    const cachedBm = getCachedBattlemetricsHours(guildId, steamId, linkedBmId);
+    const bmSummary = cachedBm || await fetchBattleMetricsSummary(steamId, name, linkedBmId);
+    if (bmSummary) cacheBattlemetricsHours(guildId, steamId, bmSummary);
     members.push({
       name,
       steamId,
       isLeader: rustplus.team.leaderSteamId === p.steamId,
       isOnline,
       avatarUrl: await getSteamAvatarUrl(client, steamId),
-      battlemetrics: await fetchBattleMetricsSummary(steamId, name, linkedBmId)
+      battlemetrics: bmSummary
     });
   }
   return { ok: true, hosterSteamId, hosterIsTeamLeader: hosterSteamId === rustplus.team.leaderSteamId, leaderSteamId: rustplus.team.leaderSteamId, members };
+}
+
+function getBattlemetricsCacheKey(guildId, steamId, linkedPlayerId) {
+  return `${guildId || 'noguild'}:${steamId || 'nosteam'}:${linkedPlayerId || 'nolink'}`;
+}
+
+function getCachedBattlemetricsHours(guildId, steamId, linkedPlayerId) {
+  const key = getBattlemetricsCacheKey(guildId, steamId, linkedPlayerId);
+  const cached = battlemetricsHoursCache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    battlemetricsHoursCache.delete(key);
+    return null;
+  }
+  return cached.value;
+}
+
+function cacheBattlemetricsHours(guildId, steamId, summary) {
+  const linkedPlayerId = summary?.playerId || null;
+  const key = getBattlemetricsCacheKey(guildId, steamId, linkedPlayerId);
+  battlemetricsHoursCache.set(key, { value: summary, expiresAt: Date.now() + BATTLEMETRICS_HOURS_CACHE_MS });
 }
 
 async function postTeamPromote(client, url, req, res) {
@@ -1761,8 +1787,8 @@ function appJs() {
       els.teamList.innerHTML = (team.members || []).map(m => {
         const avatar = m.avatarUrl ? '<img src="' + escapeHtml(m.avatarUrl) + '" />' : '👤';
         const bmText = m.battlemetrics?.playtimeHours != null
-          ? ('BM: ' + m.battlemetrics.playtimeHours + 'h')
-          : (m.battlemetrics?.playerId ? ('BM: profile ' + m.battlemetrics.playerId + ' (no playtime)') : 'BM: unavailable');
+          ? ('Battlemetric Hours: ' + m.battlemetrics.playtimeHours + 'h')
+          : (m.battlemetrics?.playerId ? ('Battlemetric Hours: profile ' + m.battlemetrics.playerId + ' (no playtime)') : 'Battlemetric Hours: unavailable');
         const promoteBtn = team.hosterIsTeamLeader && !m.isLeader ? '<button class="btn full js-promote" data-steamid="' + escapeHtml(m.steamId) + '">Promote</button>' : '';
         const kickBtn = team.hosterIsTeamLeader && !m.isLeader ? '<button class="btn full js-kick" data-steamid="' + escapeHtml(m.steamId) + '">Kick</button>' : '';
         return '<div class="vendor-row"><div class="vendor-title"><span class="shop-icon">' + avatar + '</span><span>' + escapeHtml(m.name) + (m.isLeader ? ' 👑' : '') + '</span></div><div class="vendor-meta">' + escapeHtml(m.steamId || '-') + (m.isOnline ? ' • online' : ' • offline') + '</div><div class="vendor-meta">' + escapeHtml(bmText) + '</div><div class="map-buttons" style="margin-top:8px">' + promoteBtn + kickBtn + '</div></div>';
