@@ -347,7 +347,7 @@ async function getTeamData(client, url) {
     isLeader: rustplus.team.leaderSteamId === p.steamId,
     isOnline: !!p.isOnline,
     avatarUrl: await getSteamAvatarUrl(client, p.steamId || null),
-    battlemetrics: await fetchBattleMetricsSummary(p.steamId || null)
+    battlemetrics: await fetchBattleMetricsSummary(p.steamId || null, p.name || '')
   })));
   return { ok: true, hosterSteamId, hosterIsTeamLeader: hosterSteamId === rustplus.team.leaderSteamId, leaderSteamId: rustplus.team.leaderSteamId, members };
 }
@@ -377,16 +377,25 @@ async function postTeamKick(client, url, req, res) {
 
 function getHosterSteamId(client, guildId) { return client.getInstance(guildId)?.credentials?.hoster || null; }
 
-async function fetchBattleMetricsSummary(steamId) {
-  if (!steamId) return null;
+async function fetchBattleMetricsSummary(steamId, playerName = '') {
+  if (!steamId && !playerName) return null;
   try {
-    const p = await fetch(`https://api.battlemetrics.com/players?filter[search]=${encodeURIComponent(steamId)}&page[size]=1`).then(r => r.ok ? r.json() : null);
-    const id = p?.data?.[0]?.id; if (!id) return null;
+    let id = null;
+    if (steamId) {
+      const pBySteam = await fetch(`https://api.battlemetrics.com/players?filter[search]=${encodeURIComponent(steamId)}&page[size]=1`).then(r => r.ok ? r.json() : null);
+      id = pBySteam?.data?.[0]?.id || null;
+    }
+    if (!id && playerName) {
+      const pByName = await fetch(`https://api.battlemetrics.com/players?filter[search]=${encodeURIComponent(playerName)}&page[size]=5`).then(r => r.ok ? r.json() : null);
+      id = pByName?.data?.[0]?.id || null;
+    }
+    if (!id) return { unavailable: true };
     const d = await fetch(`https://api.battlemetrics.com/players/${encodeURIComponent(id)}?include=server`).then(r => r.ok ? r.json() : null);
+    if (!d) return { playerId: id, unavailable: true };
     let seconds = 0;
     for (const s of d?.data?.relationships?.servers?.data || []) seconds += Number(s?.meta?.timePlayed || 0);
     return { playerId: id, playtimeHours: Math.round((seconds / 3600) * 10) / 10 };
-  } catch (_) { return null; }
+  } catch (_) { return { unavailable: true }; }
 }
 
 
@@ -1674,10 +1683,12 @@ function appJs() {
       if (!team.ok) { els.teamList.innerHTML = '<div class="muted">Team info unavailable.</div>'; return; }
       els.teamList.innerHTML = (team.members || []).map(m => {
         const avatar = m.avatarUrl ? '<img src="' + escapeHtml(m.avatarUrl) + '" />' : '👤';
-        const playtime = m.battlemetrics?.playtimeHours != null ? (' • BM: ' + m.battlemetrics.playtimeHours + 'h') : '';
+        const bmText = m.battlemetrics?.playtimeHours != null
+          ? ('BM: ' + m.battlemetrics.playtimeHours + 'h')
+          : (m.battlemetrics?.playerId ? ('BM: profile ' + m.battlemetrics.playerId + ' (no playtime)') : 'BM: unavailable');
         const promoteBtn = team.hosterIsTeamLeader && !m.isLeader ? '<button class="btn full js-promote" data-steamid="' + escapeHtml(m.steamId) + '">Promote</button>' : '';
         const kickBtn = team.hosterIsTeamLeader && !m.isLeader ? '<button class="btn full js-kick" data-steamid="' + escapeHtml(m.steamId) + '">Kick</button>' : '';
-        return '<div class="vendor-row"><div class="vendor-title"><span class="shop-icon">' + avatar + '</span><span>' + escapeHtml(m.name) + (m.isLeader ? ' 👑' : '') + '</span></div><div class="vendor-meta">' + escapeHtml(m.steamId || '-') + (m.isOnline ? ' • online' : ' • offline') + playtime + '</div><div class="map-buttons" style="margin-top:8px">' + promoteBtn + kickBtn + '</div></div>';
+        return '<div class="vendor-row"><div class="vendor-title"><span class="shop-icon">' + avatar + '</span><span>' + escapeHtml(m.name) + (m.isLeader ? ' 👑' : '') + '</span></div><div class="vendor-meta">' + escapeHtml(m.steamId || '-') + (m.isOnline ? ' • online' : ' • offline') + '</div><div class="vendor-meta">' + escapeHtml(bmText) + '</div><div class="map-buttons" style="margin-top:8px">' + promoteBtn + kickBtn + '</div></div>';
       }).join('') || '<div class="muted">No team members available.</div>';
       els.teamList.querySelectorAll('.js-promote').forEach(b => b.addEventListener('click', async () => { await postJson('/api/team/promote?guildId=' + encodeURIComponent(els.guild.value), { steamId: b.dataset.steamid }); toast('Promote request sent'); renderTeamManagement(); }));
       els.teamList.querySelectorAll('.js-kick').forEach(b => b.addEventListener('click', async () => {
