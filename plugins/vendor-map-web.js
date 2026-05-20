@@ -400,7 +400,16 @@ async function fetchBattleMetricsSummary(steamId, playerName = '', linkedPlayerI
     const d = await fetch(`https://api.battlemetrics.com/players/${encodeURIComponent(id)}?include=server`).then(r => r.ok ? r.json() : null);
     if (!d) return { playerId: id, unavailable: true };
     let seconds = 0;
-    for (const s of d?.data?.relationships?.servers?.data || []) seconds += Number(s?.meta?.timePlayed || 0);
+    const includedServers = Array.isArray(d?.included) ? d.included : [];
+    for (const server of includedServers) {
+      if (server?.type !== 'server') continue;
+      const game = server?.relationships?.game?.data?.id;
+      if (game && game !== 'rust') continue;
+      seconds += Number(server?.meta?.timePlayed || 0);
+    }
+    if (seconds <= 0) {
+      for (const s of d?.data?.relationships?.servers?.data || []) seconds += Number(s?.meta?.timePlayed || 0);
+    }
     return { playerId: id, playtimeHours: Math.round((seconds / 3600) * 10) / 10 };
   } catch (_) { return { unavailable: true }; }
 }
