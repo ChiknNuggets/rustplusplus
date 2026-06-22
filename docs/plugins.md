@@ -111,5 +111,5 @@ Restart the bot; type `!hello` in team chat to see the response.
 
 Voice-from-SteamID example
 - Included: `plugins/example-voice-from-steamid.js` (default disabled)
-- Behavior: when a configured SteamID speaks in team chat, the bot speaks the message in the connected voice channel.
-- Configure: open Settings → Plugins → example-voice-from-steamid.js → Edit, and set the SteamID64.
+- Behavior: when a configured SteamID speaks in team chat, the bot uses Google TTS to speak the message in the connected voice channel.
+- Configure: open Settings → Plugins → example-voice-from-steamid.js → Edit, and set the SteamID64, Google TTS API key, and an optional Google TTS voice name (e.g., `en-US-Chirp-HD-O`).
