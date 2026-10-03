@@ -1,7 +1,7 @@
 // Example plugin: If a specific SteamID talks in team chat, speak it in Discord VC
 // Default off until configured
 
-const { createAudioPlayer, createAudioResource, getVoiceConnection, StreamType } = require('@discordjs/voice');
+const { createAudioPlayer, createAudioResource, getVoiceConnection, StreamType, entersState, VoiceConnectionStatus, AudioPlayerStatus } = require('@discordjs/voice');
 const { Readable } = require('stream');
 
 const LANGUAGE_MAP = {
@@ -58,26 +58,37 @@ module.exports = {
       const voiceName = (settings.voiceName || '').trim();
       if (!targetSteamId) return; // not configured
 
+      const msgSteamId = `${message.steamId}`; // normalize
+      if (msgSteamId !== targetSteamId) return;
+
       if (!apiKey) {
         client.log(client.intlGet(null, 'warnCap'), '[voice-from-steamid] missing Google TTS API key', 'warn');
         return;
       }
 
-      const msgSteamId = `${message.steamId}`; // normalize
-      if (msgSteamId !== targetSteamId) return;
-
       const text = `${message.message}`;
       const connection = getVoiceConnection(guildId);
-      if (!connection) return;
+      if (!connection) {
+        client.log(client.intlGet(null, 'warnCap'), `[voice-from-steamid] guild ${guildId}: no voice connection; use /voice join`, 'warn');
+        return;
+      }
+      client.log(client.intlGet(null, 'infoCap'), `[voice-from-steamid] guild ${guildId}: matched chat message; connection ${connection.state.status}`);
+      try {
+        await entersState(connection, VoiceConnectionStatus.Ready, 15000);
+      } catch (_) {
+        client.log(client.intlGet(null, 'errorCap'), `[voice-from-steamid] guild ${guildId}: voice not ready (${connection.state.status}, close code ${connection.state.closeCode ?? 'none'}); use /voice join`, 'error');
+        return;
+      }
 
       const language = resolveLanguageCode(instance.generalSettings?.language);
       const gender = instance.generalSettings?.voiceGender === 'female' ? 'FEMALE' : 'MALE';
       const voice = voiceName
         ? { name: voiceName, languageCode: language }
         : { languageCode: language, ssmlGender: gender };
-      const response = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`, {
+      const response = await fetch('https://texttospeech.googleapis.com/v1/text:synthesize', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
+        signal: AbortSignal.timeout(20000),
         body: JSON.stringify({
           input: { text },
           voice,
@@ -86,17 +97,26 @@ module.exports = {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
+        const errorText = (await response.text()).split(apiKey).join('[REDACTED]');
         client.log(client.intlGet(null, 'errorCap'), `[voice-from-steamid] Google TTS error: ${errorText}`, 'error');
         return;
       }
 
       const payload = await response.json();
-      if (!payload?.audioContent) return;
+      if (!payload?.audioContent) throw new Error('Google TTS returned no audio content');
       const buffer = Buffer.from(payload.audioContent, 'base64');
+      client.log(client.intlGet(null, 'infoCap'), `[voice-from-steamid] guild ${guildId}: synthesized ${buffer.length} audio bytes`);
       const resource = createAudioResource(Readable.from(buffer), { inputType: StreamType.OggOpus });
       const player = createAudioPlayer();
-      connection.subscribe(player);
+      player.on('error', error => {
+        client.log(client.intlGet(null, 'errorCap'), `[voice-from-steamid] guild ${guildId}: playback error: ${error.message}`, 'error');
+      });
+      player.on('stateChange', (oldState, newState) => {
+        client.log(client.intlGet(null, 'infoCap'), `[voice-from-steamid] guild ${guildId}: playback ${oldState.status} -> ${newState.status}`);
+      });
+      const subscription = connection.subscribe(player);
+      if (!subscription) throw new Error('Could not subscribe audio player to voice connection');
+      player.once(AudioPlayerStatus.Idle, () => subscription.unsubscribe());
       player.play(resource);
     } catch (e) {
       try { client.log(client.intlGet(null, 'errorCap'), `[voice-from-steamid] ${e?.stack || e}`, 'error'); } catch (_) {}

@@ -20,7 +20,8 @@
 */
 
 const Builder = require('@discordjs/builders');
-const { joinVoiceChannel, getVoiceConnection } = require('@discordjs/voice');
+const { joinVoiceChannel, getVoiceConnection, entersState, VoiceConnectionStatus } = require('@discordjs/voice');
+const monitoredConnections = new WeakSet();
 
 const DiscordMessages = require('../discordTools/discordMessages.js');
 
@@ -58,6 +59,28 @@ module.exports = {
                         guildId: interaction.guild.id,
                         adapterCreator: interaction.guild.voiceAdapterCreator,
                     });
+                    if (!monitoredConnections.has(connection)) {
+                        monitoredConnections.add(connection);
+                        connection.on('stateChange', (oldState, newState) => {
+                            const closeCode = newState.closeCode === undefined ? '' : `, close code ${newState.closeCode}`;
+                            client.log(client.intlGet(null, 'infoCap'),
+                                `[voice] guild ${interaction.guildId}: ${oldState.status} -> ${newState.status}${closeCode}`);
+                        });
+                        connection.on('error', error => {
+                            client.log(client.intlGet(null, 'errorCap'), `[voice] guild ${interaction.guildId}: ${error.message}`, 'error');
+                        });
+                    }
+                    try {
+                        await entersState(connection, VoiceConnectionStatus.Ready, 20000);
+                    } catch (error) {
+                        const state = connection.state;
+                        client.log(client.intlGet(null, 'errorCap'),
+                            `[voice] Connection not ready for guild ${interaction.guildId}: ${state.status}, close code ${state.closeCode ?? 'none'}`, 'error');
+                        if (state.status !== VoiceConnectionStatus.Destroyed) connection.destroy();
+                        await DiscordMessages.sendVoiceMessage(interaction,
+                            'Could not establish a voice connection. Check the bot logs for the connection status, then try /voice join again.');
+                        break;
+                    }
                     await DiscordMessages.sendVoiceMessage(interaction,
                         client.intlGet(interaction.guildId, 'commandsVoiceBotJoinedVoice'));
                     client.log(client.intlGet(null, 'infoCap'), client.intlGet(interaction.guildId, 'commandsVoiceJoin',
