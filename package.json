@@ -3,10 +3,12 @@
     "version": "1.22.0",
     "description": "A NodeJS Discord Bot that uses the rustplus.js library to utilize the power of the Rust+ Companion App with additional Quality-of-Life features.",
     "main": "index.ts",
+    "engines": {
+        "node": ">=22.12.0"
+    },
     "scripts": {
         "start": "ts-node .",
-        "preinstall": "npx npm-force-resolutions",
-        "test": "tsc --noEmit -p ."
+        "test": "tsc --noEmit -p . && node --test tests/*.test.cjs"
     },
     "repository": {
         "type": "git",
@@ -20,7 +22,7 @@
     "homepage": "https://github.com/alexemanuelol/rustplusplus#readme",
     "dependencies": {
         "@discordjs/rest": "^2.5.1",
-        "@discordjs/voice": "^0.18.0",
+        "@discordjs/voice": "0.19.2",
         "@formatjs/intl": "^2.6.9",
         "@liamcottle/push-receiver": "^0.0.4",
         "@liamcottle/rustplus.js": "git+https://github.com/alexemanuelol/rustplus.js.git#089cfd3db1b04709911948bce669273139c6a124",
@@ -38,7 +40,7 @@
         "typescript": "^5.8.3",
         "winston": "^3.8.2"
     },
-    "resolutions": {
+    "overrides": {
         "jpeg-js": "0.4.4",
         "protobufjs": "7.2.4"
     }
