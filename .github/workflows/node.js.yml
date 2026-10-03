@@ -28,6 +28,8 @@ jobs:
         cache: 'npm'
     - name: Install Node Packages
       run: npm ci
+    - name: Verify reproducible lockfile
+      run: git diff --exit-code -- package-lock.json
     - name: Test
       run: npm test
     - name: Fix imports in src (replace .ts with .js)
