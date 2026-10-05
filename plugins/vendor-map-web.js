@@ -271,6 +271,7 @@ async function handleRequest(client, req, res) {
   if (req.method === 'GET' && url.pathname === '/api/guilds') return sendJson(res, 200, listGuilds(client));
   if (req.method === 'GET' && url.pathname === '/api/vendor-map') return sendJson(res, 200, await getVendorMap(client, url));
   if (req.method === 'GET' && url.pathname === '/api/export') return sendJson(res, 200, await getVendorMap(client, url, true));
+  if (req.method === 'GET' && url.pathname === '/api/player-battlemetrics') return sendJson(res, 200, await getPlayerBattlemetrics(client, url));
   if (req.method === 'POST' && url.pathname === '/api/home') return postHome(client, url, req, res);
   if (req.method === 'POST' && url.pathname === '/api/refresh-interval') return postRefreshInterval(client, url, req, res);
   if (req.method === 'POST' && url.pathname === '/api/annotations') return postAnnotations(client, url, req, res);
@@ -427,6 +428,87 @@ async function getVendorMap(client, url, exportOnly = false) {
     summary: summarizeVendors(vendors),
     events: recentEvents.get(guildId) || []
   };
+}
+
+
+async function getPlayerBattlemetrics(client, url) {
+  const guildId = url.searchParams.get('guildId');
+  const steamId = String(url.searchParams.get('steamId') || '').trim();
+  if (!guildId) return { ok: false, error: 'guildId required' };
+  if (!steamId) return { ok: false, error: 'steamId required' };
+
+  try {
+    const player = await fetchBattlemetricsPlayerBySteamId(client, steamId);
+    if (!player) return { ok: false, error: 'No BattleMetrics player found for this Steam ID.' };
+    return { ok: true, player };
+  }
+  catch (err) {
+    return { ok: false, error: err?.message || 'BattleMetrics lookup failed' };
+  }
+}
+
+async function fetchBattlemetricsPlayerBySteamId(client, steamId) {
+  const searchUrl = `https://api.battlemetrics.com/players?filter[search]=${encodeURIComponent(steamId)}&page[size]=10`;
+  const searchData = await fetchJson(searchUrl);
+  const players = Array.isArray(searchData?.data) ? searchData.data : [];
+  const match = players.find((entry) => String(entry?.attributes?.private || '') !== 'true') || players[0];
+  if (!match?.id) return null;
+
+  const detailUrl = `https://api.battlemetrics.com/players/${encodeURIComponent(match.id)}?include=server,identifier`;
+  const detail = await fetchJson(detailUrl);
+  const attrs = detail?.data?.attributes || {};
+  const included = Array.isArray(detail?.included) ? detail.included : [];
+  const aliases = included
+    .filter((x) => x?.type === 'identifier' && String(x?.attributes?.type || '').toLowerCase() === 'name')
+    .map((x) => ({
+      name: x?.attributes?.identifier || null,
+      lastSeen: x?.attributes?.lastSeen || null
+    }))
+    .filter((x) => x.name)
+    .sort((a, b) => new Date(b.lastSeen || 0) - new Date(a.lastSeen || 0));
+
+  const servers = included
+    .filter((x) => x?.type === 'server')
+    .map((x) => ({
+      id: x?.id || null,
+      name: x?.attributes?.name || 'Unknown server',
+      playTime: Number(x?.meta?.timePlayed || 0)
+    }))
+    .filter((x) => Number.isFinite(x.playTime) && x.playTime > 0)
+    .sort((a, b) => b.playTime - a.playTime)
+    .slice(0, 8);
+
+  return {
+    battlemetricsId: match.id,
+    profileUrl: `https://www.battlemetrics.com/players/${encodeURIComponent(match.id)}`,
+    name: attrs?.name || steamId,
+    steamId,
+    firstSeen: attrs?.createdAt || null,
+    totalPlaytime: Number(attrs?.playTime || 0),
+    aliases: aliases.slice(0, 20),
+    favoriteServers: servers
+  };
+}
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'user-agent': 'rustplusplus-vendor-map' } }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode}`));
+        return;
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(body)); }
+        catch (err) { reject(err); }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(10000, () => { req.destroy(new Error('Request timed out')); });
+  });
 }
 
 async function buildMapPayload(client, guildId, rustplus, exportOnly) {
@@ -1227,6 +1309,10 @@ function htmlPage() {
         <div id="profitList" class="profit-list"></div>
       </section>
       <section class="card" data-mobile-panel="vendors">
+        <h2>Players</h2>
+        <div id="playerList" class="vendor-list"></div>
+      </section>
+      <section class="card" data-mobile-panel="vendors">
         <h2>Vendors</h2>
         <button id="toggleVendorList" class="btn full">Show vendor list</button>
         <div id="vendorList" class="vendor-list" style="display:none"></div>
@@ -1270,7 +1356,8 @@ function appJs() {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
     showOutOfStock: document.getElementById('showOutOfStock'), hideEmptyVending: document.getElementById('hideEmptyVending'), showPlayers: document.getElementById('showPlayers'), showMonuments: document.getElementById('showMonuments'),
-    vendorList: document.getElementById('vendorList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), priceCheckList: document.getElementById('priceCheckList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
+    vendorList: document.getElementById('vendorList'),
+    playerList: document.getElementById('playerList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), priceCheckList: document.getElementById('priceCheckList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
     layer: document.getElementById('markerLayer'), drawCanvas: null, empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast'), homeX: document.getElementById('homeX'), homeY: document.getElementById('homeY'), homeRadius: document.getElementById('homeRadius'), homeStatus: document.getElementById('homeStatus'), refreshSeconds: document.getElementById('refreshSeconds'), hiddenItems: document.getElementById('hiddenItems'), toggleVendorList: document.getElementById('toggleVendorList'), lineColor: document.getElementById('lineColor')
   };
   const headers = { 'x-vendor-map-token': token };
@@ -1574,6 +1661,43 @@ function appJs() {
     els.profitList.innerHTML = routes.slice(0, 12).map(route => '<div class="profit-row" data-buy-id="' + escapeHtml(route.buyVendorId) + '" data-sell-id="' + escapeHtml(route.sellVendorId) + '"><span class="shop-icon">↔️</span><div class="profit-main"><div class="profit-title">' + escapeHtml(route.itemName) + ' → +' + escapeHtml(route.totalProfit) + ' ' + escapeHtml(route.currencyName) + '</div><div class="profit-route">' + escapeHtml(route.routeText) + '</div><div class="profit-gain">Route: ' + escapeHtml(route.buyGrid || '?') + ' → ' + escapeHtml(route.sellGrid || '?') + ' · max ' + escapeHtml(route.tradableItemCount) + ' items</div></div></div>').join('');
     els.profitList.querySelectorAll('.profit-row').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.buyId)));
   }
+
+
+  function renderPlayerList(players){
+    if (!players.length) { els.playerList.innerHTML = '<div class="muted">No players found.</div>'; return; }
+    els.playerList.innerHTML = players.map(p => {
+      const bmLink = p.steamId ? ('https://www.battlemetrics.com/rcon/players?filter[search]=' + encodeURIComponent(p.steamId)) : '';
+      return '<div class="vendor-row"><div class="vendor-title"><span>👤 ' + escapeHtml(p.name || 'Unknown') + '</span><span>' + (p.online ? 'Online' : 'Offline') + '</span></div>' +
+        '<div class="vendor-meta">Steam: ' + escapeHtml(p.steamId || 'Unknown') + '</div>' +
+        '<div class="map-buttons" style="margin-top:8px"><a class="btn" target="_blank" rel="noopener noreferrer" href="' + escapeHtml(bmLink) + '">BattleMetrics</a>' +
+        '<button class="btn primary" data-bm-check="' + escapeHtml(p.steamId || '') + '">BM check</button></div></div>';
+    }).join('');
+    els.playerList.querySelectorAll('[data-bm-check]').forEach(btn => btn.addEventListener('click', async () => {
+      const steamId = btn.getAttribute('data-bm-check');
+      if (!steamId) return toast('No Steam ID available for this player.');
+      btn.disabled = true;
+      const original = btn.textContent;
+      btn.textContent = 'Loading…';
+      try {
+        const res = await fetch('/api/player-battlemetrics?guildId=' + encodeURIComponent(els.guild.value) + '&steamId=' + encodeURIComponent(steamId) + '&token=' + encodeURIComponent(state.token)).then(r => r.json());
+        if (!res.ok || !res.player) { toast(res.error || 'BattleMetrics check failed.'); return; }
+        const player = res.player;
+        const aliases = (player.aliases || []).slice(0, 8).map(a => a.name).join(', ') || 'None';
+        const fav = (player.favoriteServers || []).slice(0, 5).map(s => '<li>' + escapeHtml(s.name) + ' — ' + formatHours(s.playTime) + '</li>').join('') || '<li>None</li>';
+        els.details.classList.remove('closed');
+        els.detailsBody.innerHTML = '<h2>👤 ' + escapeHtml(player.name || steamId) + '</h2>' +
+          '<p><span class="pill">Steam ' + escapeHtml(player.steamId || steamId) + '</span><span class="pill">BM ' + escapeHtml(player.battlemetricsId || '?') + '</span></p>' +
+          '<p><a class="btn" target="_blank" rel="noopener noreferrer" href="' + escapeHtml(player.profileUrl || '#') + '">Open BattleMetrics profile</a></p>' +
+          '<p><b>Total playtime:</b> ' + formatHours(player.totalPlaytime) + '<br><b>First seen:</b> ' + escapeHtml(player.firstSeen ? new Date(player.firstSeen).toLocaleString() : 'Unknown') + '</p>' +
+          '<h2>Previous names</h2><div class="muted">' + escapeHtml(aliases) + '</div>' +
+          '<h2>Favorite servers</h2><ul>' + fav + '</ul>';
+      } catch (_) { toast('BattleMetrics check failed.'); }
+      btn.disabled = false;
+      btn.textContent = original;
+    }));
+  }
+
+  function formatHours(seconds){ const hrs = Number(seconds || 0) / 3600; return (Math.round(hrs * 10) / 10).toFixed(1) + 'h'; }
 
   function renderVendorList(vendors){
     if (!vendors.length) { els.vendorList.innerHTML = '<div class="muted">No vendors match the current filters.</div>'; return; }
