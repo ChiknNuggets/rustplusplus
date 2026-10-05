@@ -18,8 +18,10 @@ let authToken = null;
 let configWatcher = null;
 let serverClosing = null;
 const steamAvatarCache = new Map();
+const battlemetricsHoursCache = new Map();
 const STEAM_AVATAR_CACHE_MS = 24 * 60 * 60 * 1000;
 const STEAM_AVATAR_RETRY_MS = 10 * 60 * 1000;
+const BATTLEMETRICS_HOURS_CACHE_MS = 12 * 60 * 60 * 1000;
 const UNAVATAR_STEAM_URL = 'https://unavatar.io/steam/';
 const recentEvents = new Map();
 const STATIC_FILE_DIRS = [
@@ -270,7 +272,10 @@ async function handleRequest(client, req, res) {
   if (req.method === 'GET' && url.pathname.startsWith('/map-image/')) return sendMapImage(url, req, res);
   if (req.method === 'GET' && url.pathname === '/api/guilds') return sendJson(res, 200, listGuilds(client));
   if (req.method === 'GET' && url.pathname === '/api/vendor-map') return sendJson(res, 200, await getVendorMap(client, url));
+  if (req.method === 'GET' && url.pathname === '/api/team') return sendJson(res, 200, await getTeamData(client, url));
   if (req.method === 'GET' && url.pathname === '/api/export') return sendJson(res, 200, await getVendorMap(client, url, true));
+  if (req.method === 'POST' && url.pathname === '/api/team/promote') return postTeamPromote(client, url, req, res);
+  if (req.method === 'POST' && url.pathname === '/api/team/kick') return postTeamKick(client, url, req, res);
   if (req.method === 'POST' && url.pathname === '/api/home') return postHome(client, url, req, res);
   if (req.method === 'POST' && url.pathname === '/api/refresh-interval') return postRefreshInterval(client, url, req, res);
   if (req.method === 'POST' && url.pathname === '/api/annotations') return postAnnotations(client, url, req, res);
@@ -330,6 +335,164 @@ async function postRefreshInterval(client, url, req, res) {
   catch (err) {
     return sendJson(res, 500, { ok: false, error: err?.message || 'failed to save refresh interval' });
   }
+}
+
+async function getTeamData(client, url) {
+  const guildId = url.searchParams.get('guildId');
+  if (!guildId) return { ok: false, error: 'guildId required' };
+  const rustplus = client.rustplusInstances?.[guildId];
+  if (!rustplus?.team) return { ok: false, error: 'team data unavailable' };
+  const hosterSteamId = getHosterSteamId(client, guildId);
+  const members = [];
+  for (const p of (rustplus.team.players || [])) {
+    const steamId = p.steamId || null;
+    const name = p.name || 'Unknown';
+    const isOnline = !!p.isOnline;
+    const linkedBmId = await resolveAndStoreBattlemetricsLink(client, guildId, steamId, name, isOnline);
+    const cachedBm = getCachedBattlemetricsHours(guildId, steamId, linkedBmId);
+    const bmSummary = cachedBm || await fetchBattleMetricsSummary(steamId, name, linkedBmId);
+    if (bmSummary) cacheBattlemetricsHours(guildId, steamId, bmSummary);
+    members.push({
+      name,
+      steamId,
+      isLeader: rustplus.team.leaderSteamId === p.steamId,
+      isOnline,
+      avatarUrl: await getSteamAvatarUrl(client, steamId),
+      battlemetrics: bmSummary
+    });
+  }
+  return { ok: true, hosterSteamId, hosterIsTeamLeader: hosterSteamId === rustplus.team.leaderSteamId, leaderSteamId: rustplus.team.leaderSteamId, members };
+}
+
+function getBattlemetricsCacheKey(guildId, steamId, linkedPlayerId) {
+  return `${guildId || 'noguild'}:${steamId || 'nosteam'}:${linkedPlayerId || 'nolink'}`;
+}
+
+function getCachedBattlemetricsHours(guildId, steamId, linkedPlayerId) {
+  const key = getBattlemetricsCacheKey(guildId, steamId, linkedPlayerId);
+  const cached = battlemetricsHoursCache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    battlemetricsHoursCache.delete(key);
+    return null;
+  }
+  return cached.value;
+}
+
+function cacheBattlemetricsHours(guildId, steamId, summary) {
+  const linkedPlayerId = summary?.playerId || null;
+  const key = getBattlemetricsCacheKey(guildId, steamId, linkedPlayerId);
+  battlemetricsHoursCache.set(key, { value: summary, expiresAt: Date.now() + BATTLEMETRICS_HOURS_CACHE_MS });
+}
+
+async function postTeamPromote(client, url, req, res) {
+  const guildId = url.searchParams.get('guildId');
+  const steamId = String((await readJson(req))?.steamId || '');
+  const rustplus = client.rustplusInstances?.[guildId];
+  if (!guildId || !steamId || !rustplus?.team) return sendJson(res, 400, { ok: false, error: 'invalid request' });
+  const hosterSteamId = getHosterSteamId(client, guildId);
+  if (!hosterSteamId || rustplus.team.leaderSteamId !== hosterSteamId) return sendJson(res, 403, { ok: false, error: 'hoster is not team leader' });
+  const response = await rustplus.promoteToLeaderAsync(steamId);
+  return sendJson(res, 200, { ok: !response?.error, response });
+}
+
+async function postTeamKick(client, url, req, res) {
+  const guildId = url.searchParams.get('guildId');
+  const steamId = String((await readJson(req))?.steamId || '');
+  const rustplus = client.rustplusInstances?.[guildId];
+  if (!guildId || !steamId || !rustplus?.team) return sendJson(res, 400, { ok: false, error: 'invalid request' });
+  const hosterSteamId = getHosterSteamId(client, guildId);
+  if (!hosterSteamId || rustplus.team.leaderSteamId !== hosterSteamId) return sendJson(res, 403, { ok: false, error: 'hoster is not team leader' });
+  if (typeof rustplus.kickFromTeamAsync !== 'function') return sendJson(res, 400, { ok: false, error: 'kick API unavailable in current rustplus build' });
+  const response = await rustplus.kickFromTeamAsync(steamId);
+  return sendJson(res, 200, { ok: !response?.error, response });
+}
+
+function getHosterSteamId(client, guildId) { return client.getInstance(guildId)?.credentials?.hoster || null; }
+
+async function fetchBattleMetricsSummary(steamId, playerName = '', linkedPlayerId = null) {
+  if (!steamId && !playerName) return null;
+  try {
+    let id = linkedPlayerId || null;
+    if (steamId) {
+      const pBySteam = await fetch(`https://api.battlemetrics.com/players?filter[search]=${encodeURIComponent(steamId)}&page[size]=1`).then(r => r.ok ? r.json() : null);
+      id = pBySteam?.data?.[0]?.id || null;
+    }
+    if (!id && playerName) {
+      const pByName = await fetch(`https://api.battlemetrics.com/players?filter[search]=${encodeURIComponent(playerName)}&page[size]=10`).then(r => r.ok ? r.json() : null);
+      const target = String(playerName).trim().toLowerCase();
+      const exact = (pByName?.data || []).find((row) => String(row?.attributes?.name || '').trim().toLowerCase() === target);
+      id = exact?.id || null;
+    }
+    if (!id) return { unavailable: true };
+    const d = await fetch(`https://api.battlemetrics.com/players/${encodeURIComponent(id)}?include=server`).then(r => r.ok ? r.json() : null);
+    if (!d) return { playerId: id, unavailable: true };
+    let seconds = 0;
+    const includedServers = Array.isArray(d?.included) ? d.included : [];
+    for (const server of includedServers) {
+      if (server?.type !== 'server') continue;
+      const game = server?.relationships?.game?.data?.id;
+      if (game && game !== 'rust') continue;
+      seconds += Number(server?.meta?.timePlayed || 0);
+    }
+    if (seconds <= 0) {
+      for (const s of d?.data?.relationships?.servers?.data || []) seconds += Number(s?.meta?.timePlayed || 0);
+    }
+    return { playerId: id, playtimeHours: Math.round((seconds / 3600) * 10) / 10 };
+  } catch (_) { return { unavailable: true }; }
+}
+
+function getBattlemetricsLinkMap(client, guildId) {
+  try {
+    const instance = client.getInstance(guildId);
+    const settings = instance?.pluginSettings?.[PLUGIN_NAME] || {};
+    const raw = settings.teamBattlemetricsLinks;
+    if (!raw || typeof raw !== 'string') return {};
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch (_) { return {}; }
+}
+
+function saveBattlemetricsLink(client, guildId, steamId, playerId) {
+  if (!steamId || !playerId) return;
+  try {
+    const instance = client.getInstance(guildId);
+    if (!instance.pluginSettings) instance.pluginSettings = {};
+    if (!instance.pluginSettings[PLUGIN_NAME]) instance.pluginSettings[PLUGIN_NAME] = {};
+    const links = getBattlemetricsLinkMap(client, guildId);
+    links[String(steamId)] = String(playerId);
+    instance.pluginSettings[PLUGIN_NAME].teamBattlemetricsLinks = JSON.stringify(links);
+    client.setInstance(guildId, instance);
+  } catch (_) { /* ignore */ }
+}
+
+async function resolveAndStoreBattlemetricsLink(client, guildId, steamId, playerName, isOnline) {
+  const links = getBattlemetricsLinkMap(client, guildId);
+  if (steamId && links[String(steamId)]) return String(links[String(steamId)]);
+  if (!isOnline || !playerName) return null;
+  try {
+    const instance = client.getInstance(guildId);
+    const active = instance?.activeServer;
+    const bmServerId = active && instance?.serverList?.[active] ? instance.serverList[active].battlemetricsId : null;
+    if (!bmServerId) return null;
+    const bmLocal = client?.battlemetricsInstances?.[bmServerId];
+    if (!bmLocal?.ready || !bmLocal?.players) return null;
+    const target = String(playerName).trim().toLowerCase();
+    let matchId = null;
+    const exactTarget = String(playerName).trim().toLowerCase();
+    for (const pid of (bmLocal.onlinePlayers || [])) {
+      const n = String(bmLocal.players?.[pid]?.name || '').trim().toLowerCase();
+      if (n === exactTarget) { matchId = pid; break; }
+    }
+    if (!matchId) {
+      const entries = Object.entries(bmLocal.players || {});
+      const exactAny = entries.find(([_, data]) => String(data?.name || '').trim().toLowerCase() === exactTarget);
+      matchId = exactAny?.[0] || null;
+    }
+    if (!matchId) return null;
+    if (steamId) saveBattlemetricsLink(client, guildId, steamId, matchId);
+    return String(matchId);
+  } catch (_) { return null; }
 }
 
 
@@ -1167,11 +1330,16 @@ function htmlPage() {
       <button id="exportJson" class="btn" title="Export JSON">⬇️ JSON</button>
       <span id="status" class="status">Loading…</span>
     </div>
+    <nav class="desktop-tabs" aria-label="Main sections">
+      <button class="desktop-tab active" data-view="map">🗺️ Vendor Map</button>
+      <button class="desktop-tab" data-view="team">👥 Team</button>
+    </nav>
     <nav class="mobile-tabs" aria-label="Vendor map sections">
       <button class="mobile-tab active" data-panel="map" title="Map" aria-label="Map">🗺️</button>
       <button class="mobile-tab" data-panel="controls" title="Settings" aria-label="Settings">⚙️</button>
       <button class="mobile-tab" data-panel="prices" title="Prices" aria-label="Prices">💰</button>
       <button class="mobile-tab" data-panel="vendors" title="Vendors" aria-label="Vendors">🛒</button>
+      <button class="mobile-tab" data-panel="team" title="Team" aria-label="Team">👥</button>
       <button class="mobile-tab" data-panel="home" title="Home" aria-label="Home">⌂</button>
       <button class="mobile-tab" data-panel="events" title="Events" aria-label="Events">⚡</button>
     </nav>
@@ -1249,6 +1417,12 @@ function htmlPage() {
       <div id="detailsBody"></div>
     </aside>
   </main>
+  <main class="team-page" data-view="team" style="display:none">
+    <section class="card">
+      <h2>Team management</h2>
+      <div id="teamList" class="vendor-list"></div>
+    </section>
+  </main>
   <div id="toast" class="toast" hidden></div>
   <script src="/app.js"></script>
 </body>
@@ -1256,7 +1430,7 @@ function htmlPage() {
 }
 
 function appCss() {
-  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.mobile-tabs{display:none}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab;touch-action:none;overscroll-behavior:contain}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.draw-layer{position:absolute;left:0;top:0;transform-origin:0 0;pointer-events:none}.draw-overlay{position:absolute;top:12px;right:12px;z-index:4;display:flex;gap:6px}.draw-overlay .btn{padding:8px 10px}.draw-overlay input[type="color"]{width:38px;height:38px;padding:0;border:1px solid var(--line);border-radius:8px;background:#111827}.draw-overlay .btn.active{border-color:#fbbf24;box-shadow:0 0 0 2px rgba(251,191,36,.25)}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list,.profit-list,.price-check-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row,.profit-row,.price-check-row{display:grid;grid-template-columns:38px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover,.profit-row:hover,.price-check-row:hover,.cheap-option:hover{background:#1b2230}.shop-icon{position:relative;width:36px;height:36px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 36px}.shop-icon.stock-in{border-color:rgba(74,222,128,.85);box-shadow:0 0 0 1px rgba(74,222,128,.18)}.shop-icon.stock-out{border-color:rgba(239,68,68,.85);box-shadow:0 0 0 1px rgba(239,68,68,.18)}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.stock-badge{position:absolute;right:-2px;bottom:-2px;min-width:15px;height:15px;padding:0 4px;border-radius:999px;background:#111827;border:1px solid rgba(255,255,255,.75);color:#fff;font-size:10px;line-height:13px;font-weight:900;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.55);pointer-events:none}.shop-icon.stock-out .stock-badge{background:#7f1d1d}.cheap-main,.profit-main,.price-check-main{min-width:0}.cheap-title,.cheap-cost,.profit-title,.profit-route,.price-check-title,.price-check-route,.cheap-option-title,.cheap-option-meta{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title,.profit-title,.price-check-title{font-weight:700}.cheap-cost,.profit-route,.price-check-route{color:var(--muted);font-size:12px}.profit-gain,.price-check-location{color:var(--good);font-size:12px;font-weight:800}.cheap-options{grid-column:1/-1;margin:2px 0 0 46px;border-left:2px solid var(--line);display:grid;gap:2px}.cheap-option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:7px 9px;border-radius:8px;cursor:pointer}.cheap-option-title{font-weight:700;font-size:12px}.cheap-option-meta{color:var(--muted);font-size:12px}.price-check-location{color:var(--warn)}.home-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:8px}.home-grid .input{width:100%;min-width:0}#homeRadius{grid-column:1/-1}#homeStatus{margin-top:8px}.refresh-setting{display:block;margin-top:10px}.refresh-setting .input{margin-top:5px}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.pill.danger{color:#2a0606;background:#ef4444}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible;padding:0;background-position:center;background-repeat:no-repeat;background-size:cover}.marker:hover,.marker:focus,.marker:focus-within{z-index:1000}.marker.vending{width:38px;height:38px;background:transparent;border:0;border-radius:0;box-shadow:none}.marker.vending.stock-in .marker-image,.marker.cluster.stock-in .marker-image{filter:drop-shadow(0 0 7px rgba(74,222,128,.95)) drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker.vending.stock-out .marker-image,.marker.cluster.stock-out .marker-image{filter:drop-shadow(0 0 7px rgba(248,113,113,.95)) drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker.vending.stock-in::after,.marker.vending.stock-out::after,.marker.cluster.stock-in::after,.marker.cluster.stock-out::after{content:'';position:absolute;right:1px;bottom:1px;width:11px;height:11px;border-radius:50%;border:2px solid #0c0f14;background:var(--good);z-index:3}.marker.vending.stock-out::after,.marker.cluster.stock-out::after{background:#ef4444}.marker.vending .marker-label{top:35px}.marker.home{width:30px;height:30px;background:var(--good);color:#062411;border-radius:50%;font-weight:900;font-size:14px}.marker.cluster{width:40px;height:40px;background:transparent;border:0;border-radius:0;box-shadow:none;font-weight:900}.marker-image{width:100%;height:100%;display:block;object-fit:contain;filter:drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker-image.avatar-image{aspect-ratio:1/1;object-fit:cover;border-radius:50%;filter:none}.cluster-count{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;font-weight:1000;line-height:1;text-shadow:0 2px 0 #000,0 -2px 0 #000,2px 0 0 #000,-2px 0 0 #000,0 3px 8px #000}.cluster-popover,.vendor-popover{display:none;position:absolute;left:50%;top:calc(100% - 2px);transform:translateX(-50%) scale(var(--inverse-scale,1));transform-origin:top center;width:380px;max-height:360px;overflow-y:auto;overscroll-behavior:contain;background:#111722;border:1px solid var(--line);border-radius:12px;padding:10px;text-align:left;box-shadow:0 12px 42px rgba(0,0,0,.65);z-index:1001}.marker.cluster:hover .cluster-popover,.marker.cluster:focus .cluster-popover,.marker.cluster:focus-within .cluster-popover,.marker.cluster.selected .cluster-popover,.marker.vending:hover .vendor-popover,.marker.vending:focus .vendor-popover,.marker.vending:focus-within .vendor-popover,.marker.vending.selected .vendor-popover{display:block}.cluster-title{font-weight:900;margin-bottom:6px}.cluster-vendor{border-top:1px solid var(--line);padding:7px 0}.cluster-vendor:first-of-type{border-top:0}.cluster-items{display:grid;gap:4px;max-height:170px;overflow:auto}.cluster-head,.cluster-item{display:grid;grid-template-columns:minmax(0,1fr) 26px minmax(0,1fr);align-items:center;gap:8px;color:var(--muted);font-size:12px}.cluster-head{position:sticky;top:0;z-index:1;background:#111722;color:var(--text);font-weight:800;padding:2px 0 4px}.trade-cell{display:flex;align-items:center;gap:6px;min-width:0}.trade-cell span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.trade-arrow{text-align:center;color:var(--muted);font-weight:800}.mini-icon{width:22px;height:22px;border-radius:5px;background:#0d1118;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;overflow:hidden}.mini-icon img{width:100%;height:100%;object-fit:cover;display:block}.mini-icon.placeholder{color:var(--muted);font-size:10px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.player.avatar{width:34px;height:34px;aspect-ratio:1/1;background:#111722;color:transparent;border-radius:50%;overflow:visible}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item b .shop-icon{width:34px;height:34px;flex-basis:34px}.item b span{min-width:0;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.cluster-detail-vendor{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.cluster-detail-vendor h3{font-size:14px;margin:0 0 6px}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){body{overflow:hidden}.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:8px;gap:8px}.brand{width:100%;font-size:16px}.brand-icon{font-size:20px}.toolbar{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px}.toolbar .btn{padding:8px}.toolbar .status{grid-column:1/-1;font-size:12px;min-height:18px}.mobile-tabs{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;width:100%}.mobile-tab{border:1px solid var(--line);background:#202633;color:var(--text);border-radius:12px;min-height:42px;font-size:20px;cursor:pointer}.mobile-tab.active{background:var(--accent);border-color:#e15b45;box-shadow:0 0 0 2px rgba(206,65,43,.25)}.layout{display:block;height:calc(100dvh - 148px);min-height:0}.sidebar,.details,.map-panel{display:none}.map-panel{height:100%}body[data-mobile-panel="map"] .map-panel{display:block}body[data-mobile-panel="controls"] .sidebar,body[data-mobile-panel="prices"] .sidebar,body[data-mobile-panel="vendors"] .sidebar,body[data-mobile-panel="home"] .sidebar,body[data-mobile-panel="events"] .sidebar{display:block;height:100%;overflow:auto;border:0;padding:10px}.sidebar .card{display:none;margin-bottom:10px}body[data-mobile-panel="controls"] .sidebar [data-mobile-panel="controls"],body[data-mobile-panel="prices"] .sidebar [data-mobile-panel="prices"],body[data-mobile-panel="vendors"] .sidebar [data-mobile-panel="vendors"],body[data-mobile-panel="home"] .sidebar [data-mobile-panel="home"],body[data-mobile-panel="events"] .sidebar [data-mobile-panel="events"]{display:block}.details:not(.closed){display:block;position:fixed;top:148px;left:0;right:0;bottom:0;width:100%;z-index:30;border-left:0;box-shadow:0 -20px 45px rgba(0,0,0,.45)}.map-help{top:8px;left:8px;right:8px;font-size:12px;text-align:center}.empty{left:12px;right:12px;bottom:12px}.map-buttons{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}`;
+  return `:root{color-scheme:dark;--bg:#101217;--panel:#181c24;--panel2:#202633;--text:#f5f1eb;--muted:#9da6b5;--line:#303849;--accent:#ce412b;--good:#4ade80;--warn:#fbbf24;--blue:#60a5fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,Segoe UI,Arial,sans-serif}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:rgba(16,18,23,.94);position:sticky;top:0;z-index:10}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}.brand-icon{font-size:24px}.toolbar{display:flex;align-items:center;gap:8px}.desktop-tabs{display:flex;gap:8px}.desktop-tab{border:1px solid var(--line);background:#202633;color:var(--text);border-radius:9px;padding:8px 10px;cursor:pointer}.desktop-tab.active{background:var(--accent);border-color:#e15b45}.mobile-tabs{display:none}.layout{display:grid;grid-template-columns:360px minmax(0,1fr) 380px;height:calc(100vh - 58px);min-height:540px}.team-page{padding:16px;max-width:1100px;margin:0 auto}.sidebar,.details{overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px}.details{border-left:1px solid var(--line);border-right:0;position:relative}.details.closed{display:none}.map-panel{position:relative;min-width:0;background:#0c0f14}.map{position:absolute;inset:0;overflow:hidden;cursor:grab;touch-action:none;overscroll-behavior:contain}.map.dragging{cursor:grabbing}.map-help{position:absolute;top:12px;left:12px;z-index:3;background:rgba(0,0,0,.55);padding:8px 10px;border-radius:10px;color:var(--muted);backdrop-filter:blur(8px)}#mapImage{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;pointer-events:none}.marker-layer{position:absolute;left:0;top:0;transform-origin:0 0}.draw-layer{position:absolute;left:0;top:0;transform-origin:0 0;pointer-events:none}.draw-overlay{position:absolute;top:12px;right:12px;z-index:4;display:flex;gap:6px}.draw-overlay .btn{padding:8px 10px}.draw-overlay input[type="color"]{width:38px;height:38px;padding:0;border:1px solid var(--line);border-radius:8px;background:#111827}.draw-overlay .btn.active{border-color:#fbbf24;box-shadow:0 0 0 2px rgba(251,191,36,.25)}.empty{position:absolute;inset:auto 24px 24px 24px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);background:rgba(24,28,36,.85)}.card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}.card h2{margin:0 0 10px;font-size:15px}.input{background:#0d1118;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 10px;outline:0}.input:focus{border-color:var(--accent)}.full{width:100%}.btn{border:1px solid var(--line);background:#252c3a;color:var(--text);border-radius:9px;padding:9px 11px;cursor:pointer}.btn:hover{border-color:#566174}.btn.primary{background:var(--accent);border-color:#e15b45}.status,.muted{color:var(--muted)}.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:8px;align-items:center}.map-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{padding:9px;border:1px solid var(--line);border-radius:10px;background:#131822}.stat b{display:block;font-size:20px}.stat span{color:var(--muted);font-size:12px}.vendor-list,.cheapest-list,.profit-list,.price-check-list{display:grid;gap:8px}.category-block{border:1px solid var(--line);border-radius:12px;background:#151a23;overflow:hidden}.category-head{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;background:#111722;font-weight:800}.cheap-row,.profit-row,.price-check-row{display:grid;grid-template-columns:38px minmax(0,1fr);gap:9px;padding:9px 10px;border-top:1px solid var(--line);cursor:pointer}.cheap-row:hover,.profit-row:hover,.price-check-row:hover,.cheap-option:hover{background:#1b2230}.shop-icon{position:relative;width:36px;height:36px;aspect-ratio:1/1;border-radius:7px;display:flex;align-items:center;justify-content:center;background:#0d1118;border:1px solid var(--line);font-size:18px;line-height:1;overflow:hidden;flex:0 0 36px}.shop-icon.stock-in{border-color:rgba(74,222,128,.85);box-shadow:0 0 0 1px rgba(74,222,128,.18)}.shop-icon.stock-out{border-color:rgba(239,68,68,.85);box-shadow:0 0 0 1px rgba(239,68,68,.18)}.shop-icon img{width:100%;height:100%;object-fit:cover;display:block}.stock-badge{position:absolute;right:-2px;bottom:-2px;min-width:15px;height:15px;padding:0 4px;border-radius:999px;background:#111827;border:1px solid rgba(255,255,255,.75);color:#fff;font-size:10px;line-height:13px;font-weight:900;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.55);pointer-events:none}.shop-icon.stock-out .stock-badge{background:#7f1d1d}.cheap-main,.profit-main,.price-check-main{min-width:0}.cheap-title,.cheap-cost,.profit-title,.profit-route,.price-check-title,.price-check-route,.cheap-option-title,.cheap-option-meta{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cheap-title,.profit-title,.price-check-title{font-weight:700}.cheap-cost,.profit-route,.price-check-route{color:var(--muted);font-size:12px}.profit-gain,.price-check-location{color:var(--good);font-size:12px;font-weight:800}.cheap-options{grid-column:1/-1;margin:2px 0 0 46px;border-left:2px solid var(--line);display:grid;gap:2px}.cheap-option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:7px 9px;border-radius:8px;cursor:pointer}.cheap-option-title{font-weight:700;font-size:12px}.cheap-option-meta{color:var(--muted);font-size:12px}.price-check-location{color:var(--warn)}.home-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:8px}.home-grid .input{width:100%;min-width:0}#homeRadius{grid-column:1/-1}#homeStatus{margin-top:8px}.refresh-setting{display:block;margin-top:10px}.refresh-setting .input{margin-top:5px}.vendor-row{border:1px solid var(--line);border-radius:12px;padding:10px;background:#151a23;cursor:pointer}.vendor-row:hover,.vendor-row.active{border-color:var(--accent)}.vendor-title{display:flex;justify-content:space-between;gap:8px;font-weight:700}.vendor-meta{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:12px;background:#2b3342;color:var(--muted);margin:2px 4px 0 0}.pill.good{color:#062411;background:var(--good)}.pill.warn{color:#271b00;background:var(--warn)}.pill.danger{color:#2a0606;background:#ef4444}.marker{position:absolute;width:28px;height:28px;aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 3px 14px rgba(0,0,0,.6);cursor:pointer;font-size:15px;z-index:2;line-height:1;overflow:visible;padding:0;background-position:center;background-repeat:no-repeat;background-size:cover}.marker:hover,.marker:focus,.marker:focus-within{z-index:1000}.marker.vending{width:38px;height:38px;background:transparent;border:0;border-radius:0;box-shadow:none}.marker.vending.stock-in .marker-image,.marker.cluster.stock-in .marker-image{filter:drop-shadow(0 0 7px rgba(74,222,128,.95)) drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker.vending.stock-out .marker-image,.marker.cluster.stock-out .marker-image{filter:drop-shadow(0 0 7px rgba(248,113,113,.95)) drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker.vending.stock-in::after,.marker.vending.stock-out::after,.marker.cluster.stock-in::after,.marker.cluster.stock-out::after{content:'';position:absolute;right:1px;bottom:1px;width:11px;height:11px;border-radius:50%;border:2px solid #0c0f14;background:var(--good);z-index:3}.marker.vending.stock-out::after,.marker.cluster.stock-out::after{background:#ef4444}.marker.vending .marker-label{top:35px}.marker.home{width:30px;height:30px;background:var(--good);color:#062411;border-radius:50%;font-weight:900;font-size:14px}.marker.cluster{width:40px;height:40px;background:transparent;border:0;border-radius:0;box-shadow:none;font-weight:900}.marker-image{width:100%;height:100%;display:block;object-fit:contain;filter:drop-shadow(0 3px 8px rgba(0,0,0,.75))}.marker-image.avatar-image{aspect-ratio:1/1;object-fit:cover;border-radius:50%;filter:none}.cluster-count{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;font-weight:1000;line-height:1;text-shadow:0 2px 0 #000,0 -2px 0 #000,2px 0 0 #000,-2px 0 0 #000,0 3px 8px #000}.cluster-popover,.vendor-popover{display:none;position:absolute;left:50%;top:calc(100% - 2px);transform:translateX(-50%) scale(var(--inverse-scale,1));transform-origin:top center;width:380px;max-height:360px;overflow-y:auto;overscroll-behavior:contain;background:#111722;border:1px solid var(--line);border-radius:12px;padding:10px;text-align:left;box-shadow:0 12px 42px rgba(0,0,0,.65);z-index:1001}.marker.cluster:hover .cluster-popover,.marker.cluster:focus .cluster-popover,.marker.cluster:focus-within .cluster-popover,.marker.cluster.selected .cluster-popover,.marker.vending:hover .vendor-popover,.marker.vending:focus .vendor-popover,.marker.vending:focus-within .vendor-popover,.marker.vending.selected .vendor-popover{display:block}.cluster-title{font-weight:900;margin-bottom:6px}.cluster-vendor{border-top:1px solid var(--line);padding:7px 0}.cluster-vendor:first-of-type{border-top:0}.cluster-items{display:grid;gap:4px;max-height:170px;overflow:auto}.cluster-head,.cluster-item{display:grid;grid-template-columns:minmax(0,1fr) 26px minmax(0,1fr);align-items:center;gap:8px;color:var(--muted);font-size:12px}.cluster-head{position:sticky;top:0;z-index:1;background:#111722;color:var(--text);font-weight:800;padding:2px 0 4px}.trade-cell{display:flex;align-items:center;gap:6px;min-width:0}.trade-cell span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.trade-arrow{text-align:center;color:var(--muted);font-weight:800}.mini-icon{width:22px;height:22px;border-radius:5px;background:#0d1118;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;overflow:hidden}.mini-icon img{width:100%;height:100%;object-fit:cover;display:block}.mini-icon.placeholder{color:var(--muted);font-size:10px}.marker.traveling{background:var(--warn);color:#211400}.marker.player{background:var(--blue)}.marker.player.avatar{width:34px;height:34px;aspect-ratio:1/1;background:#111722;color:transparent;border-radius:50%;overflow:visible}.marker.monument{background:#6b7280;font-size:11px}.marker.dim{opacity:.22}.marker.selected{outline:3px solid white;z-index:5}.marker-label{position:absolute;left:50%;top:29px;transform:translateX(-50%);white-space:nowrap;background:rgba(0,0,0,.72);border-radius:999px;padding:2px 7px;font-size:12px;color:white;pointer-events:none}.close{position:absolute;right:14px;top:12px;background:transparent;color:var(--muted);border:0;font-size:28px;cursor:pointer}.details h2{margin:14px 36px 2px 0}.order{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;padding:9px;border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#141923}.order.out{opacity:.5}.arrow{color:var(--muted)}.item{min-width:0}.item b{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item b .shop-icon{width:34px;height:34px;flex-basis:34px}.item b span{min-width:0;overflow:hidden;text-overflow:ellipsis}.item span{font-size:12px;color:var(--muted)}.cluster-detail-vendor{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.cluster-detail-vendor h3{font-size:14px;margin:0 0 6px}.events{display:grid;gap:7px}.event{border-left:3px solid var(--accent);padding-left:8px}.toast{position:fixed;right:18px;bottom:18px;padding:10px 13px;background:#111827;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:20}@media(max-width:1100px){.layout{grid-template-columns:320px 1fr}.details{position:fixed;right:0;top:58px;bottom:0;width:min(390px,94vw);z-index:9;box-shadow:-20px 0 45px rgba(0,0,0,.45)}}@media(max-width:760px){.desktop-tabs{display:none}body{overflow:hidden}.topbar{height:auto;min-height:58px;align-items:flex-start;flex-direction:column;padding:8px;gap:8px}.brand{width:100%;font-size:16px}.brand-icon{font-size:20px}.toolbar{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px}.toolbar .btn{padding:8px}.toolbar .status{grid-column:1/-1;font-size:12px;min-height:18px}.mobile-tabs{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px;width:100%}.mobile-tab{border:1px solid var(--line);background:#202633;color:var(--text);border-radius:12px;min-height:42px;font-size:20px;cursor:pointer}.mobile-tab.active{background:var(--accent);border-color:#e15b45;box-shadow:0 0 0 2px rgba(206,65,43,.25)}.layout{display:block;height:calc(100dvh - 148px);min-height:0}.sidebar,.details,.map-panel,.team-page{display:none}.map-panel{height:100%}body[data-mobile-panel="map"] .map-panel{display:block}body[data-mobile-panel="controls"] .sidebar,body[data-mobile-panel="prices"] .sidebar,body[data-mobile-panel="vendors"] .sidebar,body[data-mobile-panel="home"] .sidebar,body[data-mobile-panel="events"] .sidebar,body[data-mobile-panel="team"] .team-page{display:block;height:100%;overflow:auto;border:0;padding:10px}.sidebar .card{display:none;margin-bottom:10px}body[data-mobile-panel="controls"] .sidebar [data-mobile-panel="controls"],body[data-mobile-panel="prices"] .sidebar [data-mobile-panel="prices"],body[data-mobile-panel="vendors"] .sidebar [data-mobile-panel="vendors"],body[data-mobile-panel="home"] .sidebar [data-mobile-panel="home"],body[data-mobile-panel="events"] .sidebar [data-mobile-panel="events"]{display:block}.details:not(.closed){display:block;position:fixed;top:148px;left:0;right:0;bottom:0;width:100%;z-index:30;border-left:0;box-shadow:0 -20px 45px rgba(0,0,0,.45)}.map-help{top:8px;left:8px;right:8px;font-size:12px;text-align:center}.empty{left:12px;right:12px;bottom:12px}.map-buttons{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}`;
 }
 
 function appJs() {
@@ -1265,12 +1439,12 @@ function appJs() {
   const STACKED_VENDING_MACHINE_MARKER_IMAGE = ${JSON.stringify(STACKED_VENDING_MACHINE_MARKER_IMAGE)};
   const qs = new URLSearchParams(location.search);
   const token = qs.get('token') || '';
-  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{}, popoverScrollTop:0, hiddenItems:new Set(), vendorListVisible:false, annotations:{markers:[],strokes:[]}, drawMode:false, eraserMode:false, currentStroke:null, drawing:false, annotationsDirty:false, lineColor:'#fbbf24' };
+  const state = { data:null, selectedId:null, scale:1, x:0, y:0, imgW:0, imgH:0, mapSize:null, ocean:0, timer:null, expandedCheapest:{}, popoverScrollTop:0, hiddenItems:new Set(), vendorListVisible:false, annotations:{markers:[],strokes:[]}, drawMode:false, eraserMode:false, currentStroke:null, drawing:false, annotationsDirty:false, lineColor:'#fbbf24', teamData:null, teamUpdatedAt:0 };
   const els = {
     guild: document.getElementById('guildSelect'), status: document.getElementById('status'), stats: document.getElementById('stats'),
     search: document.getElementById('search'), showVending: document.getElementById('showVending'), showTraveling: document.getElementById('showTraveling'),
     showOutOfStock: document.getElementById('showOutOfStock'), hideEmptyVending: document.getElementById('hideEmptyVending'), showPlayers: document.getElementById('showPlayers'), showMonuments: document.getElementById('showMonuments'),
-    vendorList: document.getElementById('vendorList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), priceCheckList: document.getElementById('priceCheckList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
+    vendorList: document.getElementById('vendorList'), teamList: document.getElementById('teamList'), cheapestList: document.getElementById('cheapestList'), profitList: document.getElementById('profitList'), priceCheckList: document.getElementById('priceCheckList'), events: document.getElementById('eventList'), map: document.getElementById('map'), img: document.getElementById('mapImage'),
     layer: document.getElementById('markerLayer'), drawCanvas: null, empty: document.getElementById('emptyMap'), details: document.getElementById('details'), detailsBody: document.getElementById('detailsBody'), toast: document.getElementById('toast'), homeX: document.getElementById('homeX'), homeY: document.getElementById('homeY'), homeRadius: document.getElementById('homeRadius'), homeStatus: document.getElementById('homeStatus'), refreshSeconds: document.getElementById('refreshSeconds'), hiddenItems: document.getElementById('hiddenItems'), toggleVendorList: document.getElementById('toggleVendorList'), lineColor: document.getElementById('lineColor')
   };
   const headers = { 'x-vendor-map-token': token };
@@ -1283,6 +1457,7 @@ function appJs() {
 
   async function init(){
     try {
+      setDesktopView('map');
       setMobilePanel(document.body.dataset.mobilePanel || 'map');
       setupMapInteraction();
       els.drawCanvas = document.createElement('canvas'); els.drawCanvas.className='draw-layer'; els.map.appendChild(els.drawCanvas);
@@ -1333,6 +1508,7 @@ function appJs() {
       els.toggleVendorList.textContent = state.vendorListVisible ? 'Hide vendor list' : 'Show vendor list';
     });
     document.querySelectorAll('.mobile-tab[data-panel]').forEach(tab => tab.addEventListener('click', () => setMobilePanel(tab.dataset.panel)));
+    document.querySelectorAll('.desktop-tab[data-view]').forEach(tab => tab.addEventListener('click', () => setDesktopView(tab.dataset.view)));
     const pointFromEvent = (e) => { const r = els.map.getBoundingClientRect(); return { x:(e.clientX - r.left - state.x)/state.scale, y:(e.clientY - r.top - state.y)/state.scale }; };
     els.map.addEventListener('pointerdown', (e)=>{ if(!state.drawMode) return; e.preventDefault(); e.stopPropagation(); state.drawing=true; const pt=pointFromEvent(e); state.currentStroke=[pt]; });
     els.map.addEventListener('pointermove', (e)=>{ if(!state.drawMode||!state.drawing) return; e.preventDefault(); e.stopPropagation(); state.currentStroke.push(pointFromEvent(e)); renderAnnotations(); });
@@ -1346,6 +1522,18 @@ function appJs() {
     if (document.body.dataset.mobilePanel === 'map') setTimeout(fitMap, 0);
   }
 
+  function setDesktopView(view){
+    const current = view === 'team' ? 'team' : 'map';
+    document.body.dataset.desktopView = current;
+    const layout = document.querySelector('.layout');
+    const teamPage = document.querySelector('.team-page');
+    if (layout) layout.style.display = current === 'team' ? 'none' : 'grid';
+    if (teamPage) teamPage.style.display = current === 'team' ? 'block' : 'none';
+    document.querySelectorAll('.desktop-tab[data-view]').forEach(tab => tab.classList.toggle('active', tab.dataset.view === current));
+    if (current === 'map') setTimeout(fitMap, 0);
+    else refreshTeamData(true).then(() => renderTeamManagement());
+  }
+
   async function load(){
     if (!els.guild.value) return;
     setStatus('Loading…');
@@ -1356,6 +1544,7 @@ function appJs() {
     els.showOutOfStock.checked = false;
     els.refreshSeconds.value = Math.max(2, data.config?.autoRefreshSeconds || 5);
     syncHomeInputs(data.config?.home || null);
+    await refreshTeamData(true);
     renderMapImage(data.map || {});
     render();
     setStatus('Updated ' + new Date(data.generatedAt).toLocaleTimeString());
@@ -1378,10 +1567,22 @@ function appJs() {
       if (document.activeElement !== els.refreshSeconds) els.refreshSeconds.value = Math.max(2, data.config?.autoRefreshSeconds || 5);
       syncHomeInputs(data.config?.home || null, false);
       if (data.map?.image && data.map.image !== oldImage) renderMapImage(data.map);
+      if (document.body.dataset.desktopView === 'team' || document.body.dataset.mobilePanel === 'team') await refreshTeamData(false);
       render();
       setStatus('Updated ' + new Date(data.generatedAt).toLocaleTimeString());
     }
     catch (_) { /* keep stale data visible */ }
+  }
+
+  async function refreshTeamData(force){
+    if (!els.guild.value) return;
+    const stale = (Date.now() - state.teamUpdatedAt) > 60000;
+    if (!force && !stale && state.teamData) return;
+    try {
+      const team = await api('/api/team?guildId=' + encodeURIComponent(els.guild.value));
+      state.teamData = team;
+      state.teamUpdatedAt = Date.now();
+    } catch (_) { /* keep old cached team data */ }
   }
 
   function renderMapImage(map){
@@ -1400,6 +1601,7 @@ function appJs() {
     renderPriceChecks();
     renderProfitTrades();
     renderVendorList(filtered);
+    if (document.body.dataset.desktopView === 'team' || document.body.dataset.mobilePanel === 'team') renderTeamManagement();
     renderMarkers(filtered);
     renderAnnotations();
     renderEvents(data.events || []);
@@ -1582,6 +1784,34 @@ function appJs() {
       return '<div class="vendor-row ' + (v.id === state.selectedId ? 'active' : '') + '" data-id="' + escapeHtml(v.id) + '"><div class="vendor-title"><span>' + icon(v) + ' ' + escapeHtml(v.label) + '</span><span>' + escapeHtml(v.grid || '') + '</span></div><div class="vendor-meta">' + escapeHtml(v.location || 'Unknown location') + '</div><span class="pill ' + (v.type === 'traveling' ? 'warn' : ((v.inStockCount || 0) > 0 ? 'good' : 'danger')) + '">' + escapeHtml(stock) + '</span></div>';
     }).join('');
     els.vendorList.querySelectorAll('.vendor-row').forEach(row => row.addEventListener('click', () => selectVendor(row.dataset.id)));
+  }
+
+  async function renderTeamManagement(){
+    if (!els.teamList || !els.guild.value) return;
+    try {
+      await refreshTeamData(false);
+      const team = state.teamData || { ok:false };
+      if (!team.ok) { els.teamList.innerHTML = '<div class="muted">Team info unavailable.</div>'; return; }
+      els.teamList.innerHTML = (team.members || []).map(m => {
+        const avatar = m.avatarUrl ? '<img src="' + escapeHtml(m.avatarUrl) + '" />' : '👤';
+        const bmText = m.battlemetrics?.playtimeHours != null
+          ? ('Battlemetric Hours: ' + m.battlemetrics.playtimeHours + 'h')
+          : (m.battlemetrics?.playerId ? ('Battlemetric Hours: profile ' + m.battlemetrics.playerId + ' (no playtime)') : 'Battlemetric Hours: unavailable');
+        const bmLink = m.battlemetrics?.playerId
+          ? ('<div class="vendor-meta"><a href="https://www.battlemetrics.com/players/' + encodeURIComponent(m.battlemetrics.playerId) + '" target="_blank" rel="noopener noreferrer">View BattleMetrics profile</a></div>')
+          : '';
+        const promoteBtn = team.hosterIsTeamLeader && !m.isLeader ? '<button class="btn full js-promote" data-steamid="' + escapeHtml(m.steamId) + '">Promote</button>' : '';
+        const kickBtn = team.hosterIsTeamLeader && !m.isLeader ? '<button class="btn full js-kick" data-steamid="' + escapeHtml(m.steamId) + '">Kick</button>' : '';
+        return '<div class="vendor-row"><div class="vendor-title"><span class="shop-icon">' + avatar + '</span><span>' + escapeHtml(m.name) + (m.isLeader ? ' 👑' : '') + '</span></div><div class="vendor-meta">' + escapeHtml(m.steamId || '-') + (m.isOnline ? ' • online' : ' • offline') + '</div><div class="vendor-meta">' + escapeHtml(bmText) + '</div>' + bmLink + '<div class="map-buttons" style="margin-top:8px">' + promoteBtn + kickBtn + '</div></div>';
+      }).join('') || '<div class="muted">No team members available.</div>';
+      els.teamList.querySelectorAll('.js-promote').forEach(b => b.addEventListener('click', async () => { await postJson('/api/team/promote?guildId=' + encodeURIComponent(els.guild.value), { steamId: b.dataset.steamid }); toast('Promote request sent'); renderTeamManagement(); }));
+      els.teamList.querySelectorAll('.js-kick').forEach(b => b.addEventListener('click', async () => {
+        try { await postJson('/api/team/kick?guildId=' + encodeURIComponent(els.guild.value), { steamId: b.dataset.steamid }); toast('Kick request sent'); renderTeamManagement(); }
+        catch (e) { toast('Kick failed: ' + e.message); }
+      }));
+    } catch (e) {
+      els.teamList.innerHTML = '<div class="muted">Failed to load team: ' + escapeHtml(e.message) + '</div>';
+    }
   }
 
 
